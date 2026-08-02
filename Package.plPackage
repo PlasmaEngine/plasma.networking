@@ -27,7 +27,7 @@ PackageInfo
 
 	// ---- presentation ---------------------------------------------------------
 	string %DisplayName{"Networking"}
-	string %Category{"Gameplay"}
+	string %Category{"Networking"}
 	string %Description{"Multiplayer networking - client/server sessions, replicated components and property replication.
 
 Physics-aware, so it expects the Jolt plugin to be enabled. Jolt ships with the engine and does not need installing."}
