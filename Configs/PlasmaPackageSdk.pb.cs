@@ -131,6 +131,12 @@ public static class PlasmaPackageSdk
         AddImportLibrary(rules, context, "plGuiFoundation");
         AddImportLibrary(rules, context, "EditorFramework");
         AddImportLibrary(rules, context, "EditorEngineProcessFramework");
+
+        // The engine gives every editor plugin these two as well. An editor plugin that imports a
+        // mesh - a collision mesh, say - reaches plModelImporter2 through them, and without them
+        // fails to link on symbols that look nothing like the plugin's own code.
+        AddImportLibrary(rules, context, "ModelImporter2");
+        AddImportLibrary(rules, context, "HairImporter");
     }
 
     /// \brief Include root and import library for the plasma.assets built-in.
@@ -164,16 +170,50 @@ public static class PlasmaPackageSdk
     /// engine about it is reading different structs by the same name.
     public static void ConfigureJoltBuiltIn(ModuleRules rules, BuildContext context)
     {
-        rules.PublicIncludePaths.Add(Path.Combine(Root, "Code", "ThirdParty", "Jolt"));
+        // Jolt used to ship in the engine and was read out of the SDK. It is plasma.jolt now, so
+        // this binds to that package's checkout instead.
+        var joltRoot = SiblingPackage(context, "plasma.jolt");
 
-        // NetworkPluginPCH.h includes <JoltPlugin/JoltPluginPCH.h>, so the plugin group's parent
-        // directory has to be on the include path - the engine gets that for free from the way it
-        // lays plugins out, but out here it is named explicitly.
-        rules.PublicIncludePaths.Add(Path.Combine(Root, "Code", "EnginePlugins", "Physics"));
+        rules.PublicIncludePaths.Add(Path.Combine(joltRoot, "ThirdParty", "Jolt"));
 
+        // NetworkPluginPCH.h includes <JoltPlugin/JoltPluginPCH.h>, so the directory holding the
+        // plugin folder has to be on the include path.
+        rules.PublicIncludePaths.Add(Path.Combine(joltRoot, "Source"));
+
+        // Part of the binary interface rather than conveniences: JPH_DEBUG_RENDERER changes the
+        // layout of Jolt's types, so a consumer that disagrees with the provider about it is
+        // reading different structs by the same name.
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_JOLT_SUPPORT");
         rules.PublicDefinitions.Add("JPH_DEBUG_RENDERER");
-        AddImportLibrary(rules, context, "plJoltPlugin");
+
+        rules.PublicLibraries.Add(Path.Combine(joltRoot, "Bin",
+            $"{context.Platform}_x64_{context.Configuration}", "plJoltPlugin.lib"));
+    }
+
+    /// \brief Locates a sibling package checkout.
+    ///
+    /// Packages that bind to each other at build time are expected to sit side by side, which is how
+    /// the local checkouts are laid out. PLASMA_PACKAGE_PATH overrides the search root for a layout
+    /// that differs. This is a build-time path only - the runtime dependency is what the manifest's
+    /// Requires entry expresses.
+    public static string SiblingPackage(BuildContext context, string sId)
+    {
+        var overridden = Environment.GetEnvironmentVariable("PLASMA_PACKAGE_PATH");
+
+        var searchRoot = string.IsNullOrWhiteSpace(overridden)
+            ? Directory.GetParent(Path.GetFullPath(context.ProjectRoot)).FullName
+            : Path.GetFullPath(overridden);
+
+        var candidate = Path.Combine(searchRoot, sId);
+
+        if (!File.Exists(Path.Combine(candidate, "Package.plPackage")))
+        {
+            throw new DirectoryNotFoundException(
+                $"This package builds against '{sId}', which was not found at '{candidate}'. Check it " +
+                "out beside this one, or set PLASMA_PACKAGE_PATH to the directory holding both.");
+        }
+
+        return candidate;
     }
 
     /// \brief The module shape every package plugin shares: PCH, language level, export define.
