@@ -1,0 +1,21 @@
+// for a description of the options see:
+// Code/EditorPlugins/Assets/EditorPluginAssets/Assets.plPluginBundle
+
+PluginInfo
+{
+	string %DisplayName{"Networking Plugin"}
+	string %Category{"Networking"}
+	string %MinEngineVersion{"0.7.0"}
+	string %MaxEngineVersion{"0.7.0"}
+    string %Icon{"NetworkingIcon.png"}
+    string %Banner{"NetworkingBanner.png"}
+	string %Description{"Adds a networking framework to the engine."}
+	string %EditorPlugins{"plEditorPluginNetworking"}
+	string %EditorEnginePlugins{}
+	string %RuntimePlugins{"plNetworkPlugin"}
+	string %PackageDependencies{}
+	string %RequiredPlugins{"Jolt"}
+	string %ExclusiveFeatures{}
+	string %EnabledInTemplates{}
+	string %PlasmaBuildTargetName{"NetworkPlugin"}
+}

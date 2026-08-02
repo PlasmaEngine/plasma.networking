@@ -1,0 +1,18 @@
+using PlasmaBuild.Core.Configuration;
+using PlasmaBuild.Core.Rules;
+
+public class NetworkTestModule : ModuleRules
+{
+    public NetworkTestModule(BuildContext context) : base(context)
+    {
+        Type = ModuleType.Runtime;
+        SourceDirectory = "Code/UnitTests/NetworkTest";
+        PCHUsage = PCHUsage.UseExplicitOrShared;
+        SharedPCHHeaderFile = "NetworkTestPCH.h";
+        PublicIncludePaths.Add("..");
+        PrivateDependencies.Add("TestFrameworkModule");
+        PrivateDependencies.Add("NetworkPluginModule");
+        CppStandard = CppStandard.Cpp20;
+        TreatWarningsAsErrors = false;
+    }
+}

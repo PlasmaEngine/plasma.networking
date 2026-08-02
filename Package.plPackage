@@ -1,0 +1,58 @@
+// plasma.networking — multiplayer networking.
+//
+// The AUTHORED manifest, kept in source next to the plugin. It declares identity, compatibility,
+// what to load and what to ship. Component hashes and sizes are NOT here: the packaging step
+// computes those and emits them into the published manifest that ships inside the .plpkg.
+//
+// Field reference and validation rules: Docs/PluginPackageManagerPlan.html §05.
+
+PackageInfo
+{
+	// ---- identity -------------------------------------------------------------
+	// Version starts at 1.0.0 rather than inheriting an engine version: this package
+	// versions on its own changes from now on, not on the engine's.
+	string %Id{"plasma.networking"}
+	string %Version{"1.0.0"}
+	string %Publisher{"PlasmaTechnology"}
+	string %License{"MIT"}
+	string %Homepage{"https://plasmagameengine.com"}
+
+	// ---- compatibility --------------------------------------------------------
+	// Must equal plSdkVersion::GetAbiTag() of the engine these binaries were built
+	// against. The build configuration is part of it - a Development and a Shipping
+	// build do not share a binary interface.
+	string %MinEngineVersion{"0.7.0"}
+	string %MaxEngineVersion{"0.7.0"}
+	string %AbiTag{"win64-msvc19-0.7.0-dev"}
+
+	// ---- presentation ---------------------------------------------------------
+	string %DisplayName{"Networking"}
+	string %Category{"Gameplay"}
+	string %Description{"Multiplayer networking - client/server sessions, replicated components and property replication.
+
+Physics-aware, so it expects the Jolt plugin to be enabled. Jolt ships with the engine and does not need installing."}
+	string %Icon{"Branding/NetworkingIcon.png"}
+	string %Banner{"Branding/NetworkingBanner.png"}
+
+	// ---- binaries -------------------------------------------------------------
+	// Nothing to redistribute. enet is compiled into plFoundation.dll by the engine,
+	// so this package binds to it rather than carrying a second copy.
+	string %EditorPlugins{"plEditorPluginNetworking"}
+	string %EditorEnginePlugins{}
+	string %RuntimePlugins{"plNetworkPlugin"}
+	string %PackageDependencies{}
+
+	// ---- dependencies ---------------------------------------------------------
+	// The bundle declares RequiredPlugins{"Jolt"}, and unlike AudioSystem that really
+	// is a plugin rather than an engine module. It is not a package though: Jolt is a
+	// template default and stays in the engine, so there is nothing for the registry
+	// to resolve and no Requires entry to write. If Jolt is ever packaged, this gains
+	// a Requires line.
+
+	// ---- components -----------------------------------------------------------
+	Component { string %Name{"manifest"} string %Platform{"any"} }
+	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
+	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
+	Component { string %Name{"icon"} string %Platform{"any"} }
+	Component { string %Name{"banner"} string %Platform{"any"} }
+}
