@@ -51,6 +51,15 @@ public:
   static void SetRateLimit(plWorld* pWorld, plUInt32 uiMaxMessagesPerSecond);
   static plUInt32 GetRateLimit(plWorld* pWorld);
   static void SetMaxRateLimitViolations(plWorld* pWorld, plUInt32 uiMaxViolations);
+
+  /// Platform lobby to join through plNetworkSession::JoinSession.
+  static void SetLobbyId(plWorld* pWorld, plStringView sLobbyId);
+  /// The session's active lobby id, else the configured one.
+  static plString GetLobbyId(plWorld* pWorld);
+  static void SetCreatePlatformLobby(plWorld* pWorld, bool bCreate);
+  /// "ENet" or "Platform".
+  static void SetDriverType(plWorld* pWorld, plStringView sDriverType);
+  static bool IsJoiningLobby(plWorld* pWorld);
 };
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_NETWORKPLUGIN_DLL, plScriptExtensionClass_Networking);

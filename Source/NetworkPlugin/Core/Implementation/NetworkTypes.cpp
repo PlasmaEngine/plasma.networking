@@ -30,10 +30,26 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plNetworkChannelTypeEnum, 1)
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plDriverTypeEnum, 1)
-  PL_ENUM_CONSTANT(plDriverTypeEnum::ENet)
+  PL_ENUM_CONSTANT(plDriverTypeEnum::ENet),
+  PL_ENUM_CONSTANT(plDriverTypeEnum::Platform)
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plNetworkConfig, 1, plRTTIDefaultAllocator<plNetworkConfig>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("ConnectionLimit", m_uiConnectionLimit)->AddAttributes(new plDefaultValueAttribute(32)),
+    PL_MEMBER_PROPERTY("ServerAddress", m_sServerAddress)->AddAttributes(new plDefaultValueAttribute("127.0.0.1")),
+    PL_MEMBER_PROPERTY("ServerPort", m_uiServerPort)->AddAttributes(new plDefaultValueAttribute(7777)),
+    PL_MEMBER_PROPERTY("MessageSize", m_uiMessageSize)->AddAttributes(new plDefaultValueAttribute(1500)),
+    PL_MEMBER_PROPERTY("MessagePoolSize", m_uiMessagePoolSize)->AddAttributes(new plDefaultValueAttribute(2048)),
+    PL_MEMBER_PROPERTY("LobbyId", m_sLobbyId),
+    PL_MEMBER_PROPERTY("CreatePlatformLobby", m_bCreatePlatformLobby)->AddAttributes(new plDefaultValueAttribute(false)),
+    PL_MEMBER_PROPERTY("LobbyMaxMembers", m_uiLobbyMaxMembers)->AddAttributes(new plDefaultValueAttribute(0)),
+    PL_MEMBER_PROPERTY("LobbyPublic", m_bLobbyPublic)->AddAttributes(new plDefaultValueAttribute(true)),
+  }
+  PL_END_PROPERTIES;
+}
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plNetworkConnectionState, 1)

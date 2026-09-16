@@ -5,6 +5,9 @@
 #include <NetworkPlugin/Core/NetworkClient.h>
 
 #include <Foundation/Containers/HashTable.h>
+#include <Foundation/Types/RefCounted.h>
+#include <Foundation/Types/SharedPtr.h>
+#include <GameEngine/PlatformServices/PlatformOperation.h>
 
 class plNetworkWorldModule;
 
@@ -55,15 +58,30 @@ public:
   /// @brief Create a new session as host
   /// @param config Network configuration (port, limits, etc.)
   /// @return True if the session was created successfully
+  ///
+  /// With m_bCreatePlatformLobby a platform lobby is created afterwards; once it exists its
+  /// "session_address" / "session_driver" attributes point at this host and GetLobbyId() is valid.
   bool CreateSession(const plNetworkConfig& config);
 
   /// @brief Join an existing session as a client
   /// @param config Network configuration (server address, port, etc.)
   /// @return True if the connection attempt started
+  ///
+  /// With m_sLobbyId set the platform lobby is joined first; the address comes from its attributes
+  /// and the client starts on the next world update. IsJoiningLobby() is true meanwhile.
   bool JoinSession(const plNetworkConfig& config);
 
-  /// @brief Leave the current session
+  /// @brief Leave the current session, and the platform lobby it created or joined
   void LeaveSession();
+
+  /// @brief Runs a client start that a resolved lobby join deferred; called by the world module every update
+  void Update();
+
+  /// @brief The platform lobby this session created or joined; invalid otherwise
+  PL_NODISCARD plPlatformLobbyId GetLobbyId() const { return m_LobbyId; }
+
+  /// @brief True from JoinSession with a lobby id until the client connection is started
+  PL_NODISCARD bool IsJoiningLobby() const { return m_bJoiningLobby; }
 
   //////////////////////////////////////////////////////////////////////////
   // Session Properties
@@ -135,6 +153,20 @@ public:
   void OnClientDisconnected(plUInt32 uiClientID);
 
 private:
+  /// Shared with pending lobby completions so a completion for a session that shut down is dropped.
+  struct Liveness : public plRefCounted
+  {
+    bool m_bAlive = true;
+  };
+
+  bool JoinViaLobby(const plNetworkConfig& config);
+  void CreatePlatformLobby(const plNetworkConfig& config);
+  void OnLobbyCreated(const plPlatformOperation& op);
+  void OnLobbyJoined(const plPlatformOperation& op);
+  void LeavePlatformLobby();
+  plString BuildLocalSessionAddress() const;
+  plSharedPtr<Liveness> GetLiveness();
+
   plNetworkWorldModule* m_pNetworkModule = nullptr;
 
   plNetworkSessionState::Enum m_State = plNetworkSessionState::None;
@@ -147,4 +179,11 @@ private:
   /// @brief Ready state per client ID (host-authoritative)
   plHashTable<plUInt32, bool> m_ReadyStates;
 
+  plPlatformLobbyId m_LobbyId;
+  bool m_bInPlatformLobby = false;
+  bool m_bJoiningLobby = false;
+  bool m_bPendingClientStart = false;
+  plNetworkConfig m_PendingConfig;
+  plUInt64 m_uiLobbyOperationId = 0; ///< Id of the outstanding Create/Join; stale completions are ignored
+  plSharedPtr<Liveness> m_pLiveness;
 };

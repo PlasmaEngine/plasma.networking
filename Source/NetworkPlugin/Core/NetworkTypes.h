@@ -93,6 +93,7 @@ struct plDriverTypeEnum
   enum Enum
   {
     ENet,
+    Platform, ///< The platform backend's relay/P2P transport (plPlatformTransport); falls back to ENet when absent.
     Default = ENet
   };
 };
@@ -127,6 +128,18 @@ public:
 
   /// \brief The size of the message pool. Beyond this will case crashes.
   plUInt16 m_uiMessagePoolSize = 2048;
+
+  /// \brief Platform lobby to join; when set, plNetworkSession::JoinSession resolves the address from the lobby.
+  plString m_sLobbyId;
+
+  /// \brief Host side: create a platform lobby that advertises this session.
+  bool m_bCreatePlatformLobby = false;
+
+  /// \brief Member limit of the created lobby; 0 uses m_uiConnectionLimit.
+  plUInt32 m_uiLobbyMaxMembers = 0;
+
+  /// \brief Created lobby is listed publicly; otherwise joinable by id only.
+  bool m_bLobbyPublic = true;
 };
 
 struct plNetworkConnectionState

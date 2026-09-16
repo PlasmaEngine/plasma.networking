@@ -38,6 +38,47 @@ None resolvable through the registry. The bundle declares `RequiredPlugins{"Jolt
 `AudioSystem` that really is a plugin rather than an engine module — but it is not a package, so
 there is nothing to resolve. If Jolt is ever packaged, this manifest gains a `Requires` line.
 
+## Platform transport and lobbies
+
+Sessions can ride on a platform backend's relay/P2P transport instead of ENet sockets, and be found
+through platform lobbies. Both need a platform backend package (Steam, EOS, ...) that provides
+`plPlatformTransport` and lobby support through `plPlatformServices`; without one the `Platform`
+driver logs a warning and the peer falls back to ENet.
+
+`plNetworkConfig` gains four fields: `m_sLobbyId`, `m_bCreatePlatformLobby`, `m_uiLobbyMaxMembers`
+(0 = connection limit) and `m_bLobbyPublic`. `plDriverTypeEnum::Platform` selects the transport
+driver; its server address is a user, written as `user:steam:7656...`, `steam:7656...` or a bare
+native id of the active backend. The port is ignored.
+
+Host:
+
+```cpp
+plNetworkConfig config;
+config.m_DriverType = plDriverTypeEnum::Platform;
+config.m_bCreatePlatformLobby = true;
+config.m_uiConnectionLimit = 4;
+
+plNetworkSession* pSession = pWorld->GetOrCreateModule<plNetworkWorldModule>()->GetSession();
+pSession->CreateSession(config);
+// The lobby is created asynchronously. Once pSession->GetLobbyId().IsValid(), the lobby carries the
+// attributes "session_address" (this host's user id, or host:port on ENet) and "session_driver".
+```
+
+Join by lobby id:
+
+```cpp
+plNetworkConfig config;
+config.m_sLobbyId = "<lobby id from Find, an invite or a friend>";
+
+pSession->JoinSession(config);
+// pSession->IsJoiningLobby() is true and GetSessionState() reports Lobby while the platform join is
+// pending. The address and driver are read from the lobby; StartClient runs on the next world update.
+```
+
+`LeaveSession()` also leaves the platform lobby the session created or joined. From scripts the same
+fields are exposed as `Networking.SetLobbyId`, `GetLobbyId`, `SetCreatePlatformLobby`,
+`SetDriverType("ENet"|"Platform")` and `IsJoiningLobby`.
+
 ## Building
 
 Requires an engine SDK — a built engine checkout — named by `PLASMA_SDK_ROOT`:

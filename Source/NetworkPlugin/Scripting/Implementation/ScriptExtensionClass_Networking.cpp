@@ -58,6 +58,11 @@ PL_BEGIN_STATIC_REFLECTED_TYPE(plScriptExtensionClass_Networking, plNoBase, 1, p
     PL_SCRIPT_FUNCTION_PROPERTY(SetRateLimit, In, "World", In, "MaxMessagesPerSecond"),
     PL_SCRIPT_FUNCTION_PROPERTY(GetRateLimit, In, "World"),
     PL_SCRIPT_FUNCTION_PROPERTY(SetMaxRateLimitViolations, In, "World", In, "MaxViolations"),
+    PL_SCRIPT_FUNCTION_PROPERTY(SetLobbyId, In, "World", In, "LobbyId"),
+    PL_SCRIPT_FUNCTION_PROPERTY(GetLobbyId, In, "World"),
+    PL_SCRIPT_FUNCTION_PROPERTY(SetCreatePlatformLobby, In, "World", In, "Create"),
+    PL_SCRIPT_FUNCTION_PROPERTY(SetDriverType, In, "World", In, "DriverType"),
+    PL_SCRIPT_FUNCTION_PROPERTY(IsJoiningLobby, In, "World"),
   }
   PL_END_FUNCTIONS;
   PL_BEGIN_ATTRIBUTES
@@ -375,4 +380,75 @@ void plScriptExtensionClass_Networking::SetMaxRateLimitViolations(plWorld* pWorl
   {
     pModule->SetMaxRateLimitViolations(uiMaxViolations);
   }
+}
+
+void plScriptExtensionClass_Networking::SetLobbyId(plWorld* pWorld, plStringView sLobbyId)
+{
+  if (auto pModule = GetNetworkModule(pWorld, true))
+  {
+    plNetworkConfig config = pModule->GetNetworkConfig();
+    config.m_sLobbyId = sLobbyId;
+    pModule->SetNetworkConfig(config);
+  }
+}
+
+plString plScriptExtensionClass_Networking::GetLobbyId(plWorld* pWorld)
+{
+  if (auto pModule = GetNetworkModule(pWorld, false))
+  {
+    const plPlatformLobbyId lobbyId = pModule->GetSession()->GetLobbyId();
+    if (lobbyId.IsValid())
+    {
+      return lobbyId.m_sId;
+    }
+
+    return pModule->GetNetworkConfig().m_sLobbyId;
+  }
+
+  return plString();
+}
+
+void plScriptExtensionClass_Networking::SetCreatePlatformLobby(plWorld* pWorld, bool bCreate)
+{
+  if (auto pModule = GetNetworkModule(pWorld, true))
+  {
+    plNetworkConfig config = pModule->GetNetworkConfig();
+    config.m_bCreatePlatformLobby = bCreate;
+    pModule->SetNetworkConfig(config);
+  }
+}
+
+void plScriptExtensionClass_Networking::SetDriverType(plWorld* pWorld, plStringView sDriverType)
+{
+  plDriverTypeEnum::Enum driverType;
+  if (sDriverType.IsEqual_NoCase("ENet"))
+  {
+    driverType = plDriverTypeEnum::ENet;
+  }
+  else if (sDriverType.IsEqual_NoCase("Platform"))
+  {
+    driverType = plDriverTypeEnum::Platform;
+  }
+  else
+  {
+    plLog::Warning("Networking.SetDriverType: unknown driver '{}' (expected 'ENet' or 'Platform')", sDriverType);
+    return;
+  }
+
+  if (auto pModule = GetNetworkModule(pWorld, true))
+  {
+    plNetworkConfig config = pModule->GetNetworkConfig();
+    config.m_DriverType = driverType;
+    pModule->SetNetworkConfig(config);
+  }
+}
+
+bool plScriptExtensionClass_Networking::IsJoiningLobby(plWorld* pWorld)
+{
+  if (auto pModule = GetNetworkModule(pWorld, false))
+  {
+    return pModule->GetSession()->IsJoiningLobby();
+  }
+
+  return false;
 }

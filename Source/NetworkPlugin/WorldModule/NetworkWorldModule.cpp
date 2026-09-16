@@ -506,6 +506,9 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
   // Update level manager (server-side timeout tracking)
   m_LevelManager.Update(dt);
 
+  // Starts a client connection that a resolved platform lobby join deferred to the world update.
+  m_Session.Update();
+
   if (m_Role == plNetworkRoleEnum::Undefined || !m_pPeer)
   {
     LogInfo();
