@@ -1,4 +1,4 @@
-#include <NetworkTest/NetworkTestPCH.h>
+#include "NetworkTestPCH.h"
 
 #include <Core/World/GameObject.h>
 #include <NetworkPlugin/Core/NetworkMessage.h>

@@ -29,9 +29,9 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plNetworkChannelTypeEnum, 1)
   PL_ENUM_CONSTANTS(plNetworkChannelTypeEnum::Unreliable, plNetworkChannelTypeEnum::UnreliableOrdered, plNetworkChannelTypeEnum::Reliable, plNetworkChannelTypeEnum::ReliableOrdered)
 PL_END_STATIC_REFLECTED_ENUM;
 
+// clang-format off
 PL_BEGIN_STATIC_REFLECTED_ENUM(plDriverTypeEnum, 1)
-  PL_ENUM_CONSTANT(plDriverTypeEnum::ENet),
-  PL_ENUM_CONSTANT(plDriverTypeEnum::Platform)
+  PL_ENUM_CONSTANTS(plDriverTypeEnum::ENet, plDriverTypeEnum::Platform)
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plNetworkConfig, 1, plRTTIDefaultAllocator<plNetworkConfig>)
@@ -51,6 +51,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plNetworkConfig, 1, plRTTIDefaultAllocator<plNet
   PL_END_PROPERTIES;
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
+// clang-format on
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plNetworkConnectionState, 1)
   PL_ENUM_CONSTANT(plNetworkConnectionState::Offline),

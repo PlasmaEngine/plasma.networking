@@ -1,9 +1,25 @@
 #include <EditorPluginNetworking/EditorPluginNetworkingPCH.h>
 
 #include <EditorPluginNetworking/PropertyGrid/ReplicationRowDecorator.h>
+#include <EditorUi/Widgets.h>
+#include <Foundation/Configuration/Plugin.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 
-static plQtNetworkReplicationRowDecorator s_NetworkReplicationDecorator;
+static plNetworkReplicationRowDecorator s_NetworkReplicationDecorator;
+static plString s_sIconFolder;
+
+/// The package's editor icons (":/AssetIcons/...", ":/TypeIcons/..." are files under EditorIcons): the plugin
+/// binary sits in <package>/Bin/<config>, both in the source tree and in an installed copy.
+static plString GetIconFolder()
+{
+  plStringBuilder sBinary, sCopy;
+  plPlugin::GetPluginPaths("plEditorPluginNetworking", sBinary, sCopy, 0);
+
+  plStringBuilder sFolder = sBinary.GetFileDirectory();
+  sFolder.PathParentDirectory(2);
+  sFolder.AppendPath("EditorIcons");
+  return sFolder;
+}
 
 static void NetworkReplicationPropertyMetaState(plPropertyMetaStateEvent& e)
 {
@@ -23,12 +39,18 @@ static void NetworkReplicationPropertyMetaState(plPropertyMetaStateEvent& e)
 
 PL_PLUGIN_ON_LOADED()
 {
-  plQtPropertyGridWidget::RegisterRowDecorator(&s_NetworkReplicationDecorator);
+  s_sIconFolder = GetIconFolder();
+  plEditorUi::AddIconFolder(s_sIconFolder);
+
+  plPropertyGridRowDecorator::Register(&s_NetworkReplicationDecorator);
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(NetworkReplicationPropertyMetaState);
 }
 
 PL_PLUGIN_ON_UNLOADED()
 {
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(NetworkReplicationPropertyMetaState);
-  plQtPropertyGridWidget::UnregisterRowDecorator(&s_NetworkReplicationDecorator);
+  plPropertyGridRowDecorator::Unregister(&s_NetworkReplicationDecorator);
+
+  plEditorUi::RemoveIconFolder(s_sIconFolder);
+  s_sIconFolder.Clear();
 }

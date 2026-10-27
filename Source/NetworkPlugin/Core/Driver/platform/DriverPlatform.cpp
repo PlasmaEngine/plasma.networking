@@ -6,7 +6,6 @@
 #include <NetworkPlugin/Core/NetworkPeer.h>
 #include <NetworkPlugin/Core/NetworkTypes.h>
 
-PL_IMPLEMENT_SINGLETON(plDriverPlatform);
 
 namespace
 {
@@ -17,7 +16,6 @@ namespace
 } // namespace
 
 plDriverPlatform::plDriverPlatform()
-  : m_SingletonRegistrar(this)
 {
 }
 
@@ -47,6 +45,7 @@ plResult plDriverPlatform::Initalize(plNetworkPeer* pNetworkPeer, const plNetwor
   }
 
   plLog::Info("Platform: transport of backend '{}' ready (max payload {} bytes).", pHub->GetBackendId(), m_pTransport->GetMaxPayloadBytes());
+
   return PL_SUCCESS;
 }
 
@@ -55,6 +54,7 @@ void plDriverPlatform::Shutdown()
   if (m_pTransport != nullptr)
   {
     m_pTransport->DisconnectAll();
+
     if (m_bListening)
     {
       m_pTransport->StopListening();
@@ -83,6 +83,7 @@ plResult plDriverPlatform::Listen()
 
   m_bListening = true;
   plLog::Info("Platform: listening as '{}' with max {} connections.", GetLocalUserAddress(), m_Config.m_uiConnectionLimit);
+
   return PL_SUCCESS;
 }
 
@@ -110,6 +111,7 @@ plResult plDriverPlatform::Connect()
   m_ServerUser = user;
   m_UserToConnection[user.m_uiHash] = 0;
   m_ConnectionToUser[0] = user;
+
   return PL_SUCCESS;
 }
 
@@ -155,6 +157,18 @@ plResult plDriverPlatform::PopEvent(plNetworkEvent& event)
     {
       case plPlatformTransportEvent::Type::Connected:
       {
+        if (!transportEvent.m_User.IsValid() || (!m_bListening && transportEvent.m_User != m_ServerUser))
+        {
+          m_pTransport->Disconnect(transportEvent.m_User);
+          continue;
+        }
+        if (m_bListening && m_uiNextConnectionID == 0)
+        {
+          m_pTransport->Disconnect(transportEvent.m_User);
+          continue; // Identity space exhausted; never wrap to the server identity.
+        }
+        if (m_bListening && m_UserToConnection.Contains(transportEvent.m_User.m_uiHash))
+          continue; // Duplicate transport notification must not create a second client record.
         // The transport has no connection cap of its own; ENet applies this limit at host creation.
         if (m_bListening && !m_UserToConnection.Contains(transportEvent.m_User.m_uiHash) &&
             m_ConnectionToUser.GetCount() >= m_Config.m_uiConnectionLimit)
@@ -163,8 +177,10 @@ plResult plDriverPlatform::PopEvent(plNetworkEvent& event)
           m_pTransport->Disconnect(transportEvent.m_User);
           continue;
         }
+
         const plUInt32 uiConnectionID = GetOrAllocateConnection(transportEvent.m_User);
         plLog::Debug("Platform: connected Id: {} ('{}').", uiConnectionID, transportEvent.m_User.m_sCanonical);
+
         event.m_Sender.m_uiConnectionID = uiConnectionID;
         event.m_EventType = plNetworkEventTypeEnum::Connected;
         break;
@@ -175,13 +191,17 @@ plResult plDriverPlatform::PopEvent(plNetworkEvent& event)
         plUInt32 uiConnectionID = 0;
         if (!m_UserToConnection.TryGetValue(transportEvent.m_User.m_uiHash, uiConnectionID))
         {
-          continue; // never connected from our point of view
+          continue; // Never connected from our point of view.
         }
+
         const bool bFailed = transportEvent.m_Type == plPlatformTransportEvent::Type::ConnectFailed;
         plLog::Debug("Platform: {} Id: {} ('{}').", bFailed ? "connect failed" : "disconnected", uiConnectionID, transportEvent.m_User.m_sCanonical);
+
         event.m_Sender.m_uiConnectionID = uiConnectionID;
         event.m_EventType = bFailed ? plNetworkEventTypeEnum::Timeout : plNetworkEventTypeEnum::Disconnected;
+
         RemoveConnection(uiConnectionID);
+
         if (transportEvent.m_User == m_ServerUser)
         {
           m_ServerUser = plPlatformUserId();
@@ -194,15 +214,23 @@ plResult plDriverPlatform::PopEvent(plNetworkEvent& event)
         {
           continue;
         }
-        const plUInt32 uiConnectionID = GetOrAllocateConnection(transportEvent.m_User);
+
+        plUInt32 uiConnectionID = 0;
+        if (!m_UserToConnection.TryGetValue(transportEvent.m_User.m_uiHash, uiConnectionID) ||
+            FindUser(uiConnectionID) == nullptr || *FindUser(uiConnectionID) != transportEvent.m_User)
+        {
+          continue; // Data is never an admission event and must not consume the message pool.
+        }
         event.m_Sender.m_uiConnectionID = uiConnectionID;
         event.m_EventType = plNetworkEventTypeEnum::Message;
+
         event.m_Message = m_pNetworkPeer->CreateMessage();
         if (!event.m_Message.IsValid())
         {
           plLog::Error("Platform: failed to create message buffer - pool may be exhausted");
           continue;
         }
+
         const plUInt32 uiLength = transportEvent.m_Data.GetCount();
         if (uiLength < 1 || uiLength > event.m_Message.m_uiBufferSize)
         {
@@ -210,6 +238,7 @@ plResult plDriverPlatform::PopEvent(plNetworkEvent& event)
           m_pNetworkPeer->DestroyMessage(event.m_Message);
           continue;
         }
+
         event.m_Message.m_uiLength = uiLength;
         plMemoryUtils::Copy(event.m_Message.m_pBuffer, transportEvent.m_Data.GetData(), uiLength);
         ++m_uiMessagesReceived;
@@ -219,6 +248,7 @@ plResult plDriverPlatform::PopEvent(plNetworkEvent& event)
       default:
         continue;
     }
+
     return PL_SUCCESS;
   }
 }
@@ -243,6 +273,7 @@ void plDriverPlatform::SendToUser(const plPlatformUserId& user, plEnum<plNetwork
   const plArrayPtr<const plUInt8> bytes(message.m_pBuffer, message.m_uiLength);
   // The channel index is the plNetworkChannelTypeEnum value, so the transport can keep per-type ordering.
   const plUInt8 uiChannel = static_cast<plUInt8>(channelType.GetValue());
+
   if (m_pTransport->Send(user, bytes, IsReliableChannel(channelType), uiChannel).Failed())
   {
     plLog::Warning("Platform: send to '{}' failed.", user.m_sCanonical);
@@ -318,6 +349,7 @@ plNetworkStats plDriverPlatform::GetStats(plNetworkConnection target) const
 {
   // The transport exposes no per-user counters; every connection reports the driver totals.
   PL_IGNORE_UNUSED(target);
+
   plNetworkStats stats;
   stats.m_uiTotalPacketsSent = m_uiMessagesSent;
   stats.m_uiTotalBytesSent = m_uiBytesSent;
@@ -377,6 +409,7 @@ plUInt32 plDriverPlatform::GetOrAllocateConnection(const plPlatformUserId& user)
   uiConnectionID = m_uiNextConnectionID++;
   m_UserToConnection[user.m_uiHash] = uiConnectionID;
   m_ConnectionToUser[uiConnectionID] = user;
+
   return uiConnectionID;
 }
 

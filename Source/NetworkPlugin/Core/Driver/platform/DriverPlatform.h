@@ -13,7 +13,6 @@ class plPlatformTransport;
 /// (0 = the server on a client, 1.. = clients on a host). m_uiServerPort is ignored.
 class PL_NETWORKPLUGIN_DLL plDriverPlatform : public plNetworkDriverInterface
 {
-  PL_DECLARE_SINGLETON_OF_INTERFACE(plDriverPlatform, plNetworkDriverInterface);
 
 public:
   plDriverPlatform();
@@ -51,7 +50,11 @@ public:
   /// "user:<canonical id>" of the signed-in local user; empty without a hub.
   static plString GetLocalUserAddress();
 
+  /// Authenticated transport identity for admission checks; never trust an identity in game payloads.
+  PL_ALWAYS_INLINE const plPlatformUserId* GetRemoteUser(plNetworkConnection connection) const { return FindUser(connection.m_uiConnectionID); }
+
 private:
+  friend class plNetworkTestAccess;
   plUInt32 GetOrAllocateConnection(const plPlatformUserId& user);
   void RemoveConnection(plUInt32 uiConnectionID);
   const plPlatformUserId* FindUser(plUInt32 uiConnectionID) const;
@@ -61,6 +64,7 @@ private:
   plNetworkPeer* m_pNetworkPeer = nullptr;
   plPlatformTransport* m_pTransport = nullptr;
   bool m_bListening = false;
+
   plPlatformUserId m_ServerUser; ///< Client side: who Connect() dialled.
   plUInt32 m_uiNextConnectionID = 1;
   plMap<plUInt64, plUInt32> m_UserToConnection; ///< plPlatformUserId::m_uiHash -> connection id

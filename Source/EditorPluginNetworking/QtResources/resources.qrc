@@ -1,6 +1,0 @@
-<RCC>
-  <qresource prefix="/">
-    <file alias="AssetIcons/NetworkProfile.svg">NetworkProfile.svg</file>
-    <file alias="EditorPluginNetworking/Icons/NetworkSignal.svg">NetworkSignal.svg</file>
-  </qresource>
-</RCC>

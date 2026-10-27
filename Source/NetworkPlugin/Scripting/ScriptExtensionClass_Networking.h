@@ -54,12 +54,15 @@ public:
 
   /// Platform lobby to join through plNetworkSession::JoinSession.
   static void SetLobbyId(plWorld* pWorld, plStringView sLobbyId);
+
   /// The session's active lobby id, else the configured one.
   static plString GetLobbyId(plWorld* pWorld);
+
   static void SetCreatePlatformLobby(plWorld* pWorld, bool bCreate);
+  static bool IsJoiningLobby(plWorld* pWorld);
+
   /// "ENet" or "Platform".
   static void SetDriverType(plWorld* pWorld, plStringView sDriverType);
-  static bool IsJoiningLobby(plWorld* pWorld);
 };
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_NETWORKPLUGIN_DLL, plScriptExtensionClass_Networking);

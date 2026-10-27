@@ -126,6 +126,8 @@ public:
 
   /// @brief Timestamp of last received message from this client
   plTime m_LastActivityTime;
+  plTime m_AdmissionStartTime; ///< Fixed deadline: traffic cannot extend an incomplete handshake.
+  bool m_bAdmissionNotified = false;
 
   /// @brief Connection quality metrics
   plNetworkConnectionQuality m_ConnectionQuality;

@@ -1,20 +1,22 @@
 #include <NetworkPlugin/NetworkPluginPCH.h>
 
-#include <Foundation/Configuration/CVar.h>
-#include <Foundation/Algorithm/HashingUtils.h>
-#include <RendererCore/Debug/DebugRenderer.h>
-#include <NetworkPlugin/Core/Driver/DriverInterface.h>
-#include <NetworkPlugin/Components/NetworkComponent.h>
-#include <NetworkPlugin/Components/NetworkedTransformComponent.h>
-#include <NetworkPlugin/WorldModule/NetworkWorldModule.h>
-#include <NetworkPlugin/Core/NetworkObjectManager.h>
-#include <NetworkPlugin/Core/NetworkRpc.h>
-#include <NetworkPlugin/Core/NetworkBandwidth.h>
-#include <NetworkPlugin/Core/NetworkTime.h>
-#include <NetworkPlugin/Core/NetworkMessages.h>
 #include <Core/GameApplication/GameApplicationBase.h>
 #include <Core/GameState/GameStateBase.h>
 #include <Core/World/World.h>
+#include <Foundation/Algorithm/HashingUtils.h>
+#include <Foundation/Configuration/CVar.h>
+#include <Foundation/Utilities/CommandLineUtils.h>
+#include <Foundation/Types/ScopeExit.h>
+#include <NetworkPlugin/Components/NetworkComponent.h>
+#include <NetworkPlugin/Components/NetworkedTransformComponent.h>
+#include <NetworkPlugin/Core/Driver/DriverInterface.h>
+#include <NetworkPlugin/Core/NetworkBandwidth.h>
+#include <NetworkPlugin/Core/NetworkMessages.h>
+#include <NetworkPlugin/Core/NetworkObjectManager.h>
+#include <NetworkPlugin/Core/NetworkRpc.h>
+#include <NetworkPlugin/Core/NetworkTime.h>
+#include <NetworkPlugin/WorldModule/NetworkWorldModule.h>
+#include <RendererCore/Debug/DebugRenderer.h>
 
 PL_IMPLEMENT_WORLD_MODULE(plNetworkWorldModule);
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plNetworkWorldModule, 1, plRTTINoAllocator)
@@ -112,6 +114,9 @@ plNetworkWorldModule::plNetworkWorldModule(plWorld* pWorld)
 
 plNetworkWorldModule::~plNetworkWorldModule()
 {
+  m_NetworkComponents.Clear();
+  m_NetworkObjects.Clear();
+  Stop();
   m_Session.Shutdown();
   m_LevelManager.Shutdown();
   m_LagCompensation.Shutdown();
@@ -148,6 +153,8 @@ void plNetworkWorldModule::Initialize()
 
 bool plNetworkWorldModule::StartClient()
 {
+  if (m_bUpdating || m_bStopping)
+    return false;
   PL_PROFILE_SCOPE("Network Start Client");
   Stop();
 
@@ -173,6 +180,7 @@ bool plNetworkWorldModule::StartClient()
   m_pLocalClient = PL_DEFAULT_NEW(plNetworkClient);
   m_pLocalClient->m_Connection = connection;
   m_pLocalClient->m_uiClientID = m_uiLocalClientID;
+  m_pLocalClient->m_ConnectionState = plNetworkConnectionState::Connecting;
   return true;
 }
 
@@ -262,6 +270,8 @@ plNetworkClient* plNetworkWorldModule::GetClient(const plNetworkConnection& conn
 
 bool plNetworkWorldModule::StartServer()
 {
+  if (m_bUpdating || m_bStopping)
+    return false;
   PL_PROFILE_SCOPE("Network Start Server");
   Stop();
 
@@ -291,6 +301,8 @@ bool plNetworkWorldModule::StartServer()
 
 bool plNetworkWorldModule::StartHost()
 {
+  if (m_bUpdating || m_bStopping)
+    return false;
   PL_PROFILE_SCOPE("Network Start Host");
   Stop();
 
@@ -324,12 +336,23 @@ bool plNetworkWorldModule::StartHost()
   BroadcastNetworkStateChange();
 
   m_pLocalClient->m_ConnectionState = plNetworkConnectionState::Connected;
+  m_pLocalClient->m_bAdmissionNotified = true;
   BroadcastClientConnected(m_pLocalClient);
   return true;
 }
 
 void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
 {
+  if (m_bStopping)
+    return;
+  if (m_bUpdating)
+  {
+    m_bStopRequested = true;
+    m_DeferredStopReason = reason;
+    return;
+  }
+  m_bStopping = true;
+  PL_SCOPE_EXIT(m_bStopping = false);
   if (m_Status == plNetworkConnectionState::Offline && m_Role == plNetworkRoleEnum::Undefined)
   {
     return;
@@ -363,7 +386,8 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   // (avoid modifying array while iterating)
   for (plNetworkClient* client : m_pClients)
   {
-    BroadcastClientDisconnected(client);
+    if (client->m_bAdmissionNotified)
+      BroadcastClientDisconnected(client);
     client->m_ConnectionState = plNetworkConnectionState::Disconnected;
   }
   
@@ -381,6 +405,8 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   }
 
   StopPeer();
+  m_LevelManager.Shutdown();
+  m_LevelManager.Initialize(this);
   if (m_pLocalClient)
   {
     PL_DEFAULT_DELETE(m_pLocalClient);
@@ -484,6 +510,17 @@ void plNetworkWorldModule::RemoveNetworkObject(plNetworkObject* pNetObject)
 
 void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
 {
+  // Callbacks may stop the session. Keep the peer, clients and pooled event storage alive
+  // until the current dispatch unwinds; never process the next event after that request.
+  m_bUpdating = true;
+  PL_SCOPE_EXIT({
+    m_bUpdating = false;
+    if (m_bStopRequested)
+    {
+      m_bStopRequested = false;
+      Stop(m_DeferredStopReason);
+    }
+  });
   float dt = GetWorld()->GetClock().GetTimeDiff().AsFloatInSeconds();
   plTime timeNow = plTime::Now();
   float minDelta = m_fNetworkTickRate > 0 ? 1.0f / m_fNetworkTickRate : 0.0f;
@@ -507,9 +544,12 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
   m_LevelManager.Update(dt);
 
   // Starts a client connection that a resolved platform lobby join deferred to the world update.
+  // Session::Update may intentionally start a deferred lobby connection.
+  m_bUpdating = false;
   m_Session.Update();
+  m_bUpdating = true;
 
-  if (m_Role == plNetworkRoleEnum::Undefined || !m_pPeer)
+  if (m_bStopRequested || m_Role == plNetworkRoleEnum::Undefined || !m_pPeer)
   {
     LogInfo();
     return;
@@ -519,7 +559,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
 
   // Drain incoming events every frame so ENet can flush/receive without tick aliasing.
   plNetworkEvent event;
-  while (m_pPeer->PopEvent(event).Succeeded())
+  while (!m_bStopRequested && m_pPeer->PopEvent(event).Succeeded())
   {
     switch (event.m_EventType)
     {
@@ -536,11 +576,15 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           for (plNetworkComponent* pComponent : m_NetworkComponents)
           {
             pComponent->OnClientConnecting(data);
+            if (m_bStopRequested)
+              return;
           }
 
           for (plNetworkObject* pNetObject : m_NetworkObjects)
           {
             pNetObject->OnClientConnecting(data);
+            if (m_bStopRequested)
+              return;
           }
 
           if (data.m_Result.Failed())
@@ -568,10 +612,18 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
         }
         else
         {
+          if (event.m_Sender.m_uiConnectionID == 0 || GetClient(event.m_Sender) != nullptr ||
+              m_pClients.GetCount() >= m_Config.m_uiConnectionLimit || m_uiNextClientID == 0)
+          {
+            m_pPeer->Disconnect(event.m_Sender);
+            break;
+          }
           plNetworkClient* pClient = PL_DEFAULT_NEW(plNetworkClient);
           pClient->m_uiClientID = m_uiNextClientID++;
           pClient->m_Connection = event.m_Sender;
           pClient->UpdateActivity(); // Initialize activity timestamp
+          pClient->m_AdmissionStartTime = plTime::Now();
+          pClient->m_ConnectionState = plNetworkConnectionState::Connecting;
           m_pClients.PushBack(pClient);
         }
         break;
@@ -597,7 +649,8 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
           plLog::Dev("Client Disconnected with ID: {}", event.m_Sender.m_uiConnectionID);
           m_pClients.RemoveAndCopy(pClient);
-          BroadcastClientDisconnected(pClient);
+          if (pClient->m_bAdmissionNotified)
+            BroadcastClientDisconnected(pClient);
           pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
           PL_DEFAULT_DELETE(pClient);
         }
@@ -606,9 +659,10 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
       case plNetworkEventTypeEnum::Message:
       {
         plNetworkClient* pClient = GetClient(event.m_Sender);
-       if (!pClient && !IsClient())
+       if (!pClient || pClient->m_ConnectionState == plNetworkConnectionState::Disconnecting ||
+           pClient->m_ConnectionState == plNetworkConnectionState::Disconnected)
        {
-          plLog::Dev("Unknown Client", event.m_Sender.m_uiConnectionID);
+          m_pPeer->DestroyMessage(event.m_Message);
           break;
        }
 
@@ -626,8 +680,21 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           }
         }
 
-        plUInt8 id = *event.m_Message.m_pBuffer;
+        plUInt8 id = event.m_Message.ReadUInt8();
         plNetworkMessageIDs::Enum msgID = static_cast<plNetworkMessageIDs::Enum>(id);
+        const bool bHandshake = msgID == plNetworkMessageIDs::Handshake;
+        const bool bReply = msgID == plNetworkMessageIDs::HandshakeReply;
+        const bool bAdmitting = pClient->m_ConnectionState == plNetworkConnectionState::Connecting;
+        if (event.m_Message.HasReadError() ||
+            (bHandshake && (IsClient() || !bAdmitting)) ||
+            (bReply && (!IsClient() || !bAdmitting)) ||
+            (!bHandshake && !bReply && pClient->m_ConnectionState != plNetworkConnectionState::Connected))
+        {
+          RecordProtocolViolation(pClient, "message is not valid in the current admission state");
+          m_pPeer->DestroyMessage(event.m_Message);
+          break;
+        }
+        const plUInt32 senderClientID = IsClient() ? m_uiServerClientID : pClient->m_uiClientID;
         switch (msgID)
         {
           case plNetworkMessageIDs::Handshake:
@@ -644,18 +711,24 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           }
           case plNetworkMessageIDs::ObjectSpawn:
           {
+            if (!IsClient())
+              break;
             event.m_Message.m_uiPosition = 1; // Skip the message ID byte
             m_ObjectManager.HandleSpawnMessage(event.m_Message);
             break;
           }
           case plNetworkMessageIDs::ObjectDespawn:
           {
+            if (!IsClient())
+              break;
             event.m_Message.m_uiPosition = 1; // Skip the message ID byte
             m_ObjectManager.HandleDespawnMessage(event.m_Message);
             break;
           }
           case plNetworkMessageIDs::ObjectRole:
           {
+            if (!IsClient())
+              break;
             event.m_Message.m_uiPosition = 1; // Skip the message ID byte
             m_ObjectManager.HandleOwnershipMessage(event.m_Message);
             break;
@@ -663,7 +736,6 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           case plNetworkMessageIDs::ObjectRpc:
           {
             event.m_Message.m_uiPosition = 1; // Skip the message ID byte
-            plUInt32 senderClientID = pClient ? pClient->m_uiClientID : m_uiServerClientID;
             m_RpcManager.HandleRpcMessage(event.m_Message, senderClientID);
             break;
           }
@@ -703,7 +775,6 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
             }
 
             // Validate authority before applying state update
-            plUInt32 senderClientID = pClient ? pClient->m_uiClientID : m_uiServerClientID;
             if (!ValidateStateUpdate(msgData.m_uiUUID, senderClientID))
             {
               plLog::Warning("PL Net: Rejected unauthorized state update from client {} for component {}",
@@ -729,7 +800,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
               plLog::Warning("PL Net: No component found with NetID {} (total: {})", 
                 msgData.m_uiUUID, m_NetworkComponents.GetCount());
             }
-              else if ((IsServer() || IsHost()) && pClient != nullptr && pReplicatedComponent != nullptr &&
+              else if (!m_bStopRequested && !event.m_Message.HasReadError() && (IsServer() || IsHost()) && pClient != nullptr && pReplicatedComponent != nullptr &&
                       (pReplicatedComponent->GetNetworkRole() == plNetworkRoleEnum::Client ||
                        pReplicatedComponent->GetNetworkRole() == plNetworkRoleEnum::Both))
             {
@@ -791,6 +862,8 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
             plUInt8 reasonByte = event.m_Message.ReadUInt8();
             plNetworkDisconnectReason::Enum reason = static_cast<plNetworkDisconnectReason::Enum>(reasonByte);
             PL_IGNORE_UNUSED(uiSenderClientID);
+            if (event.m_Message.HasReadError())
+              break;
             
             if (IsClient())
             {
@@ -802,7 +875,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
             {
               // Client is gracefully disconnecting
               plLog::Info("PL Net: Client {} disconnected (reason: {})", pClient->m_uiClientID, reasonByte);
-              pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
+              KickClient(pClient->m_uiClientID, reason);
             }
             break;
           }
@@ -875,27 +948,37 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           }
           case plNetworkMessageIDs::LevelLoad:
           {
+            if (!IsClient())
+              break;
             event.m_Message.m_uiPosition = 1;
+            const plUInt64 uiGeneration = event.m_Message.ReadUInt64();
             plString sLevelPath = event.m_Message.ReadString();
-            m_LevelManager.HandleLevelLoadMessage(sLevelPath);
+            if (!event.m_Message.HasReadError())
+              m_LevelManager.HandleLevelLoadMessage(sLevelPath, uiGeneration);
             break;
           }
           case plNetworkMessageIDs::LevelLoadComplete:
           {
             event.m_Message.m_uiPosition = 1;
-            plUInt32 uiClientID = event.m_Message.ReadUInt32();
-            m_LevelManager.HandleLevelLoadComplete(uiClientID);
+            const plUInt64 uiGeneration = event.m_Message.ReadUInt64();
+            if (!IsClient() && !event.m_Message.HasReadError())
+              m_LevelManager.HandleLevelLoadComplete(senderClientID, uiGeneration);
             break;
           }
           case plNetworkMessageIDs::LevelStart:
           {
-            m_LevelManager.HandleLevelStartMessage();
+            event.m_Message.m_uiPosition = 1;
+            const plUInt64 uiGeneration = event.m_Message.ReadUInt64();
+            if (IsClient() && !event.m_Message.HasReadError())
+              m_LevelManager.HandleLevelStartMessage(uiGeneration);
             break;
           }
           case plNetworkMessageIDs::TransformState:
           {
             event.m_Message.m_uiPosition = 1; // Skip the message ID byte
             plUInt32 targetNetID = event.m_Message.ReadUInt32();
+            if (event.m_Message.HasReadError() || !ValidateStateUpdate(targetNetID, senderClientID))
+              break;
 
             for (plNetworkComponent* pComponent : m_NetworkComponents)
             {
@@ -928,6 +1011,8 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
               msg.m_Sender = event.m_Sender;
               msg.m_pNetworkMessage = &event.m_Message;
               BroadcastToNetworkComponents(msg);
+              if (m_bStopRequested)
+                break;
 
               // Also forward to plNetworkObject instances so game code using
               // RegisterNetworkObject() can handle user-range messages via OnNetworkMessage()
@@ -940,7 +1025,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
             break;
           }
         }
-        if (event.m_Message.HasReadError())
+        if (!m_bStopRequested && event.m_Message.HasReadError())
         {
           RecordProtocolViolation(pClient, "message payload ended before all fields were read");
         }
@@ -951,6 +1036,9 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
         break;
     }
   }
+
+  if (m_bStopRequested)
+    return;
 
   // Dirty replication is gated by network tick rate; transport pump runs every frame.
   const bool bReplicationTick = m_fNetworkTickRate <= 0.0f ||
@@ -1065,11 +1153,15 @@ void plNetworkWorldModule::BroadcastNetworkStateChange()
   for (plNetworkComponent* pComponent : m_NetworkComponents)
   {
     pComponent->OnNetworkStateChanged(m_Status);
+    if (m_bStopRequested)
+      return;
   }
 
   for (plNetworkObject* pNetObject: m_NetworkObjects)
   {
     pNetObject->OnNetworkStateChanged(m_Status);
+    if (m_bStopRequested)
+      return;
   }
 }
 
@@ -1078,11 +1170,15 @@ void plNetworkWorldModule::BroadcastClientConnected(plNetworkClient* pClient)
   for (plNetworkComponent* pComponent : m_NetworkComponents)
   {
     pComponent->OnClientConnected(pClient);
+    if (m_bStopRequested)
+      return;
   }
 
   for (plNetworkObject* pNetObject : m_NetworkObjects)
   {
     pNetObject->OnClientConnected(pClient);
+    if (m_bStopRequested)
+      return;
   }
 
   // Notify session manager
@@ -1107,6 +1203,8 @@ void plNetworkWorldModule::BroadcastClientDisconnected(plNetworkClient* pClient)
 
 void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClient* pClient)
 {
+  if (IsClient() || !pClient || pClient->m_ConnectionState != plNetworkConnectionState::Connecting)
+    return;
   plLog::Dev("Received Handshake");
 
   plNetworkClientConnecting msgData;
@@ -1136,7 +1234,8 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
     connectionData.m_pData[i] = event.m_Message.ReadUInt8();
   }
 
-  if (msgData.m_uiProtocolVersion != NETWORK_PROTOCOL_VERSION || msgData.m_uiGameVersion != m_uiGameVersion)
+  const bool bVersionMatches = msgData.m_uiProtocolVersion == NETWORK_PROTOCOL_VERSION && msgData.m_uiGameVersion == m_uiGameVersion;
+  if (!bVersionMatches)
   {
     plLog::Warning("Handshake version mismatch - rejecting client");
     connectionData.m_Result = PL_FAILURE;
@@ -1145,17 +1244,21 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
   for (plNetworkComponent* pComponent : m_NetworkComponents)
   {
     pComponent->OnClientConnecting(connectionData);
+    if (m_bStopRequested)
+      return;
   }
 
   for (plNetworkObject* pNetObject : m_NetworkObjects)
   {
     pNetObject->OnClientConnecting(connectionData);
+    if (m_bStopRequested)
+      return;
   }
 
   plLog::Dev("Handshake result after callbacks: {0}", connectionData.m_Result.Succeeded() ? "SUCCESS" : "FAILURE");
 
   plNetworkClientConnectingReply replyMessage;
-  replyMessage.m_bSuccess = connectionData.m_Result.Succeeded();
+  replyMessage.m_bSuccess = bVersionMatches && connectionData.m_Result.Succeeded();
   replyMessage.m_Reason = msgData.m_uiProtocolVersion != NETWORK_PROTOCOL_VERSION || msgData.m_uiGameVersion != m_uiGameVersion ?
     plNetworkDisconnectReason::VersionMismatch : plNetworkDisconnectReason::AuthenticationFailed;
   replyMessage.m_uiClientID = pClient->m_uiClientID;
@@ -1169,7 +1272,7 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
   m_BandwidthManager.RecordBytesSent(msgReply.m_uiLength);
   m_pPeer->SendMessages(msgReply, event.m_Sender);
 
-  if (connectionData.m_Result.Failed())
+  if (!replyMessage.m_bSuccess)
   {
     plLog::Warning("Client {0} connection failed", pClient->m_uiClientID);
     pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
@@ -1179,6 +1282,7 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
   else
   {
     pClient->m_ConnectionState = plNetworkConnectionState::Connected;
+    pClient->m_bAdmissionNotified = true;
     plLog::Info("Client {0} connected", pClient->m_uiClientID);
 
     // Sync existing state FIRST. OnClientConnected listeners typically spawn new
@@ -1195,6 +1299,8 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
     SyncComponentStatesToClient(pClient);
 
     BroadcastClientConnected(pClient);
+    if (m_bStopRequested)
+      return;
 
     // Broadcast client connected message to all network components
     {
@@ -1207,7 +1313,7 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
 
 void plNetworkWorldModule::HandleHandshakeReply(plNetworkEvent& event, plNetworkClient* pClient)
 {
-  if (!IsClient())
+  if (!IsClient() || !pClient || pClient->m_ConnectionState != plNetworkConnectionState::Connecting)
   {
     return;
   }
@@ -1227,7 +1333,7 @@ void plNetworkWorldModule::HandleHandshakeReply(plNetworkEvent& event, plNetwork
   plLog::Dev("HandshakeReply: Result={0}, ClientID={1}",
     msgData.m_bSuccess ? "SUCCESS" : "FAILURE", msgData.m_uiClientID);
 
-  if (!msgData.m_bSuccess || msgData.m_uiProtocolVersion != NETWORK_PROTOCOL_VERSION)
+  if (!msgData.m_bSuccess || msgData.m_uiProtocolVersion != NETWORK_PROTOCOL_VERSION || msgData.m_uiClientID == 0)
   {
     plLog::Warning("Server rejected connection");
     Stop();
@@ -1280,6 +1386,12 @@ bool plNetworkWorldModule::StartPeer()
     config.m_sServerAddress = "any";
   }
 
+#if PL_ENABLED(PL_COMPILE_FOR_DEVELOPMENT)
+  // Explicit local test runs must not inherit the host's wildcard bind default.
+  if (m_Role != plNetworkRoleEnum::Client && plCommandLineUtils::GetGlobalInstance()->GetBoolOption("-Network.LoopbackOnly", false))
+    config.m_sServerAddress = "127.0.0.1";
+#endif
+
   m_pPeer = plNetworkPeer::CreatePeer(config);
 
   if (!m_pPeer)
@@ -1310,7 +1422,7 @@ void plNetworkWorldModule::StopPeer()
 
 void plNetworkWorldModule::CheckClientTimeouts()
 {
-  if (!m_pPeer || m_fClientTimeoutSeconds <= 0.0f)
+  if (!m_pPeer)
     return;
 
   // Iterate backwards to safely remove while iterating
@@ -1320,12 +1432,13 @@ void plNetworkWorldModule::CheckClientTimeouts()
     if (!pClient)
       continue;
 
-    // Skip clients that are still connecting
-    if (pClient->m_ConnectionState != plNetworkConnectionState::Connected)
-      continue;
-
     float secondsSinceActivity = pClient->GetSecondsSinceLastActivity();
-    if (secondsSinceActivity > m_fClientTimeoutSeconds)
+    const bool bAdmitted = pClient->m_ConnectionState == plNetworkConnectionState::Connected;
+    const bool bExpiredAdmission = !bAdmitted &&
+      (plTime::Now() - pClient->m_AdmissionStartTime).GetSeconds() > plMath::Max(m_Config.m_fHandshakeTimeoutSeconds, 0.1f);
+    if (pClient->m_ConnectionState == plNetworkConnectionState::Disconnecting ||
+        pClient->m_ConnectionState == plNetworkConnectionState::Disconnected || bExpiredAdmission ||
+        (bAdmitted && m_fClientTimeoutSeconds > 0.0f && secondsSinceActivity > m_fClientTimeoutSeconds))
     {
       plLog::Warning("PL Net: Client {0} timed out after {1} seconds of inactivity",
         pClient->m_uiClientID, static_cast<plUInt32>(secondsSinceActivity));
@@ -1336,7 +1449,8 @@ void plNetworkWorldModule::CheckClientTimeouts()
 
       // Notify and cleanup
       m_pClients.RemoveAtAndCopy(i);
-      BroadcastClientDisconnected(pClient);
+      if (bAdmitted || pClient->m_bAdmissionNotified)
+        BroadcastClientDisconnected(pClient);
       pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
       PL_DEFAULT_DELETE(pClient);
     }
@@ -1373,25 +1487,9 @@ bool plNetworkWorldModule::HasAuthority(plNetworkComponent* pComponent, plUInt32
     case plNetworkRoleEnum::Client:
       // Check if this client owns this component via ObjectManager
       {
-        plUInt32 networkID = pComponent->GetNetID();
-        const plNetworkObjectInfo* pInfo = m_ObjectManager.GetObjectInfo(networkID);
-        if (pInfo)
-        {
-          return pInfo->m_uiOwnerClientID == uiClientID;
-        }
-
-        const plUInt32 uiObjectNetID = m_ObjectManager.GetNetworkID(pComponent->GetOwner()->GetHandle());
-        if (uiObjectNetID != 0)
-        {
-          pInfo = m_ObjectManager.GetObjectInfo(uiObjectNetID);
-          if (pInfo)
-          {
-            return pInfo->m_uiOwnerClientID == uiClientID;
-          }
-        }
-
-        // Fallback: any client can modify client-role components
-        return true;
+        const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
+        // Scene components without explicit ownership cannot grant remote write authority.
+        return pInfo != nullptr && pInfo->m_uiOwnerClientID == uiClientID;
       }
 
     case plNetworkRoleEnum::Both:
@@ -1400,20 +1498,8 @@ bool plNetworkWorldModule::HasAuthority(plNetworkComponent* pComponent, plUInt32
         if (uiClientID == m_uiServerClientID)
           return true;
 
-        plUInt32 networkID = pComponent->GetNetID();
-        const plNetworkObjectInfo* pInfo = m_ObjectManager.GetObjectInfo(networkID);
-        if (pInfo)
-        {
-          return pInfo->m_uiOwnerClientID == uiClientID;
-        }
-        const plUInt32 uiObjectNetID = m_ObjectManager.GetNetworkID(pComponent->GetOwner()->GetHandle());
-        if (uiObjectNetID != 0)
-        {
-          pInfo = m_ObjectManager.GetObjectInfo(uiObjectNetID);
-          if (pInfo)
-            return pInfo->m_uiOwnerClientID == uiClientID;
-        }
-        return false;
+        const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
+        return pInfo != nullptr && pInfo->m_uiOwnerClientID == uiClientID;
       }
 
     default:
@@ -1426,8 +1512,36 @@ bool plNetworkWorldModule::HasLocalAuthority(plNetworkComponent* pComponent) con
   return HasAuthority(pComponent, m_uiLocalClientID);
 }
 
+plNetworkComponent* plNetworkWorldModule::FindNetworkComponent(plUInt32 uiComponentNetID) const
+{
+  plNetworkComponent* pResult = nullptr;
+  for (plNetworkComponent* pComponent : m_NetworkComponents)
+  {
+    if (pComponent->GetNetID() != uiComponentNetID)
+      continue;
+    if (pResult != nullptr)
+      return nullptr; // Ambiguous identities must fail closed.
+    pResult = pComponent;
+  }
+  return pResult;
+}
+
+const plNetworkObjectInfo* plNetworkWorldModule::FindOwningObject(const plNetworkComponent* pComponent) const
+{
+  for (const plGameObject* pObject = pComponent ? pComponent->GetOwner() : nullptr; pObject; pObject = pObject->GetParent())
+  {
+    const plUInt32 uiObjectID = m_ObjectManager.GetNetworkID(pObject->GetHandle());
+    if (uiObjectID != 0)
+      return m_ObjectManager.GetObjectInfo(uiObjectID);
+  }
+  return nullptr;
+}
+
 bool plNetworkWorldModule::ValidateStateUpdate(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID) const
 {
+  plNetworkComponent* pTarget = FindNetworkComponent(uiComponentNetID);
+  if (!pTarget)
+    return false;
   // Server always accepts its own updates
   if (uiSenderClientID == m_uiServerClientID && (IsServer() || IsHost()))
   {
@@ -1440,27 +1554,7 @@ bool plNetworkWorldModule::ValidateStateUpdate(plUInt32 uiComponentNetID, plUInt
     return true;
   }
 
-  // Find the component
-  for (plNetworkComponent* pComponent : m_NetworkComponents)
-  {
-    if (pComponent->GetNetID() == uiComponentNetID)
-    {
-      return HasAuthority(pComponent, uiSenderClientID);
-    }
-  }
-
-  // Component not found - check object manager
-  const plNetworkObjectInfo* pInfo = m_ObjectManager.GetObjectInfo(uiComponentNetID);
-  if (pInfo)
-  {
-    // For network objects, check owner
-    return pInfo->m_uiOwnerClientID == uiSenderClientID ||
-           uiSenderClientID == m_uiServerClientID;
-  }
-
-  // Unknown component - reject by default for security
-  plLog::Warning("PL Net: Cannot validate authority for unknown component {}", uiComponentNetID);
-  return false;
+  return HasAuthority(pTarget, uiSenderClientID);
 }
 
 void plNetworkWorldModule::RecordLagCompensationSnapshots()
@@ -1600,7 +1694,8 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
     return;
 
   plNetworkClient* pClient = GetClient(uiClientID);
-  if (!pClient)
+  if (!pClient || pClient->m_ConnectionState == plNetworkConnectionState::Disconnecting ||
+      pClient->m_ConnectionState == plNetworkConnectionState::Disconnected)
   {
     plLog::Warning("PL Net: Tried to kick non-existent client {}", uiClientID);
     return;
@@ -1617,17 +1712,12 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
   m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
   m_pPeer->SendMessages(msg, pClient->m_Connection);
 
-  // Mark for disconnection - will be cleaned up in next update
+  // Flush the reason if possible, then close immediately. Admission state is revoked before
+  // any subsequent event; the record is reclaimed after dispatch, not while it is in use.
   pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-
-  // Optionally reserve slot for reconnection if reason allows
-  if (reason == plNetworkDisconnectReason::Timeout)
-  {
-    pClient->m_bReservedForReconnect = true;
-    pClient->m_ReconnectExpiry = plTime::Now() + plTime::MakeFromSeconds(m_fReconnectWindowSeconds);
-    plLog::Dev("PL Net: Reserved slot for client {} reconnection until {}", 
-      uiClientID, (plTime::Now() + plTime::MakeFromSeconds(m_fReconnectWindowSeconds)).GetSeconds());
-  }
+  m_pPeer->Update(0.0f);
+  m_pPeer->Disconnect(pClient->m_Connection);
+  pClient->m_bReservedForReconnect = false;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1676,9 +1766,15 @@ bool plNetworkWorldModule::CheckRateLimit(plNetworkClient* pClient)
 
 void plNetworkWorldModule::RecordProtocolViolation(plNetworkClient* pClient, const char* szReason)
 {
-  if (pClient == nullptr)
+  if (IsClient())
   {
     plLog::Warning("PL Net: Protocol violation from server: {}", szReason);
+    Stop(plNetworkDisconnectReason::Kicked);
+    return;
+  }
+  if (pClient == nullptr || pClient->m_ConnectionState == plNetworkConnectionState::Disconnecting ||
+      pClient->m_ConnectionState == plNetworkConnectionState::Disconnected)
+  {
     return;
   }
 
@@ -1762,6 +1858,8 @@ void plNetworkWorldModule::HandleEngineMessage(plUInt8 messageId, plNetworkMessa
     // Reset position for each handler so they all see the full message content
     msg.m_uiPosition = originalPosition;
     pNetObject->OnNetworkMessage(msg);
+    if (m_bStopRequested)
+      return;
   }
 }
 
@@ -1776,6 +1874,8 @@ void plNetworkWorldModule::BroadcastToNetworkComponents(plMessage& ref_msg)
     if (pComponent && pComponent->GetOwner())
     {
       pComponent->GetOwner()->SendMessage(ref_msg);
+      if (m_bStopRequested)
+        return;
     }
   }
 }

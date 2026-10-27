@@ -14,6 +14,7 @@
 #include <Foundation/IO/Stream.h>
 #include <GameEngine/Gameplay/BlackboardComponent.h>
 #include <NetworkPlugin/Core/NetworkObjectManager.h>
+#include <NetworkPlugin/Core/NetworkVariant.h>
 
 namespace
 {
@@ -24,7 +25,7 @@ namespace
     writer << value;
 
     const plUInt64 uiSize = storage.GetStorageSize64();
-    if (uiSize == 0 || uiSize > plMath::MaxValue<plUInt32>())
+    if (uiSize == 0 || uiSize > 64 * 1024)
       return false;
 
     const plUInt32 uiSize32 = static_cast<plUInt32>(uiSize);
@@ -42,18 +43,7 @@ namespace
 
   bool TryReadVariantBlob(plNetworkMessage& msg, plVariant& out_value)
   {
-    const plUInt32 uiSize = msg.ReadUInt32();
-    if (uiSize == 0)
-      return false;
-
-    plHybridArray<plUInt8, 256> temp;
-    temp.SetCountUninitialized(uiSize);
-    msg.ReadBytes(temp.GetData(), uiSize);
-
-    plMemoryStreamContainerWrapperStorage<plHybridArray<plUInt8, 256>> storage(&temp);
-    plMemoryStreamReader reader(&storage);
-    reader >> out_value;
-    return out_value.IsValid();
+    return plReadNetworkVariant(msg, out_value);
   }
 } // namespace
 
@@ -326,6 +316,11 @@ void plNetworkedBlackboardComponent::NetworkDeserialize(plNetworkMessage& msg)
 {
   const bool bFullSnapshot = msg.ReadUInt8() != 0;
   const plUInt16 uiCount = msg.ReadUInt16();
+  if (msg.HasReadError() || uiCount > msg.GetRemainingBytes() / 10)
+  {
+    msg.MarkReadError();
+    return;
+  }
 
   if (!m_pBoard)
     ResolveBlackboard();
@@ -342,7 +337,7 @@ void plNetworkedBlackboardComponent::NetworkDeserialize(plNetworkMessage& msg)
 
     plVariant value;
     if (!TryReadVariantBlob(msg, value))
-      continue;
+      return;
 
     plHashedString sHashedName;
     sHashedName.Assign(sName.GetData());

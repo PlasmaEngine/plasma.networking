@@ -578,6 +578,8 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
 
   plUInt32 rpcID = msg.ReadUInt32();
   plUInt32 componentNetID = msg.ReadUInt32();
+  if (msg.HasReadError())
+    return;
 
   // Find the RPC info
   const plNetworkRpcInfo* pRpcInfo = GetRpcInfo(rpcID);
@@ -587,59 +589,29 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
     return;
   }
 
-  // Validate sender authority for server-targeted RPCs
-  // Only the owner or server should be able to call certain RPCs
-  if (pRpcInfo->m_Target == plNetworkRpcTarget::Server)
-  {
-    // Server-targeted RPCs from clients are allowed (that's the point)
-    // but we'll validate ownership below if needed
-  }
-  else if (pRpcInfo->m_Target == plNetworkRpcTarget::Owner ||
-           pRpcInfo->m_Target == plNetworkRpcTarget::AllClients ||
-           pRpcInfo->m_Target == plNetworkRpcTarget::AllClientsAndServer ||
-           pRpcInfo->m_Target == plNetworkRpcTarget::Multicast)
-  {
-    // Only server/host should be broadcasting these to clients
-    // If we're the server receiving this from a client, validate they have authority
-    if ((m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost()) &&
-        uiSenderClientID != m_pNetworkModule->GetServerClientID())
-    {
-      // Client is trying to broadcast - check if they're the owner
-      const plNetworkObjectInfo* pObjInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(componentNetID);
-      if (pObjInfo && pObjInfo->m_uiOwnerClientID != uiSenderClientID)
-      {
-        plLog::Warning("PL Net: Client {} attempted unauthorized RPC broadcast for object {} (owner: {})",
-          uiSenderClientID, componentNetID, pObjInfo->m_uiOwnerClientID);
-        return;
-      }
-    }
-  }
-
-  // Find the component by network ID using the object manager
-  plNetworkComponent* pComponent = nullptr;
-
-  plWorld* pWorld = m_pNetworkModule->GetWorld();
-  if (!pWorld)
-    return;
-
-  // Try to find the component via the object manager
-  const plNetworkObjectInfo* pObjectInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(componentNetID);
-  if (pObjectInfo)
-  {
-    plGameObject* pGameObject = nullptr;
-    if (pWorld->TryGetObject(pObjectInfo->m_hGameObject, pGameObject))
-    {
-      plNetworkComponent* pComp = nullptr;
-      if (pGameObject->TryGetComponentOfBaseType(pComp))
-      {
-        pComponent = pComp;
-      }
-    }
-  }
+  // Component IDs are hashes, not keys in the spawned-object table. Resolve the exact
+  // component first, then walk its owning hierarchy for authorization.
+  plNetworkComponent* pComponent = m_pNetworkModule->FindNetworkComponent(componentNetID);
 
   if (!pComponent)
   {
     plLog::Warning("PL Net: RPC target component {} not found", componentNetID);
+    return;
+  }
+
+  const plNetworkObjectInfo* pObjectInfo = m_pNetworkModule->FindOwningObject(pComponent);
+  const bool bAuthority = m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost();
+  if (bAuthority)
+  {
+    plNetworkClient* pSender = m_pNetworkModule->GetClient(uiSenderClientID);
+    if (uiSenderClientID != m_pNetworkModule->GetServerClientID() &&
+        (!pSender || pSender->m_ConnectionState != plNetworkConnectionState::Connected ||
+         !pObjectInfo || pObjectInfo->m_uiOwnerClientID != uiSenderClientID))
+      return;
+  }
+  else if (!m_pNetworkModule->IsClient() || uiSenderClientID != m_pNetworkModule->GetServerClientID() ||
+           pRpcInfo->m_Target == plNetworkRpcTarget::Server)
+  {
     return;
   }
 
@@ -652,16 +624,12 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
   }
 
   // Check if we should execute this RPC locally
-  plUInt32 ownerClientID = 0;
-  plNetworkComponent* pNetComp = nullptr;
-  if (pComponent->GetOwner()->TryGetComponentOfBaseType(pNetComp) && pNetComp->GetNetID() != 0)
-  {
-    const plNetworkObjectInfo* pObjInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(pNetComp->GetNetID());
-    if (pObjInfo)
-    {
-      ownerClientID = pObjInfo->m_uiOwnerClientID;
-    }
-  }
+  const plUInt32 ownerClientID = pObjectInfo ? pObjectInfo->m_uiOwnerClientID : m_pNetworkModule->GetServerClientID();
+
+  plDynamicArray<plVariant> arguments;
+  DeserializeArguments(msg, pRpcInfo->m_pFunction, arguments);
+  if (msg.HasReadError())
+    return;
   
   if (!ShouldExecuteLocally(*pRpcInfo, uiSenderClientID, ownerClientID))
   {
@@ -679,9 +647,7 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
         relayMsg.WriteUInt32(componentNetID);
         
         // Re-serialize arguments from current position
-        plDynamicArray<plVariant> args;
-        DeserializeArguments(msg, pRpcInfo->m_pFunction, args);
-        SerializeArguments(relayMsg, pRpcInfo->m_pFunction, plArrayPtr<plVariant>(args.GetData(), args.GetCount()));
+        SerializeArguments(relayMsg, pRpcInfo->m_pFunction, arguments.GetArrayPtr());
         relayMsg.SetChannelType(GetChannelType(pRpcInfo->m_Reliability));
         
         // Send to appropriate targets
@@ -715,14 +681,12 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
         
         if (!targets.IsEmpty())
           pPeer->SendMessages(relayMsg, targets);
+        else
+          pPeer->CancelSendMessage(relayMsg);
       }
     }
     return;
   }
-
-  // Deserialize arguments
-  plDynamicArray<plVariant> arguments;
-  DeserializeArguments(msg, pRpcInfo->m_pFunction, arguments);
 
   // Execute the RPC
   plVariant returnValue;
@@ -796,13 +760,26 @@ void plNetworkRpcManager::SerializeArguments(plNetworkMessage& msg, const plAbst
 void plNetworkRpcManager::DeserializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plDynamicArray<plVariant>& out_arguments)
 {
   plUInt8 argCount = msg.ReadUInt8();
+  if (msg.HasReadError() || argCount != pFunction->GetArgumentCount())
+  {
+    msg.MarkReadError();
+    return;
+  }
   out_arguments.SetCount(argCount);
 
   for (plUInt8 i = 0; i < argCount; ++i)
   {
     const plRTTI* pExpectedType = pFunction->GetArgumentType(i);
     out_arguments[i] = ReadVariant(msg, pExpectedType);
+    if (!out_arguments[i].IsValid() || msg.HasReadError())
+    {
+      msg.MarkReadError();
+      out_arguments.Clear();
+      return;
+    }
   }
+  if (msg.GetRemainingBytes() != 0)
+    msg.MarkReadError();
 }
 
 void plNetworkRpcManager::WriteVariant(plNetworkMessage& msg, const plVariant& value)
@@ -898,6 +875,7 @@ plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* 
   if (variantType < plVariantType::Invalid || variantType >= plVariantType::LastExtendedType)
   {
     plLog::Warning("PL Net: Invalid variant type {} received in RPC - possible corruption or attack", static_cast<int>(variantType));
+    msg.MarkReadError();
     return plVariant();
   }
 
@@ -940,6 +918,14 @@ plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* 
       expectedVariantType = plVariantType::Quaternion;
     else if (pExpectedType == plGetStaticRTTI<plString>())
       expectedVariantType = plVariantType::String;
+    else if (pExpectedType == plGetStaticRTTI<plStringView>() || pExpectedType == plGetStaticRTTI<const char*>())
+      expectedVariantType = plVariantType::String;
+
+    if (expectedVariantType == plVariantType::Invalid)
+    {
+      msg.MarkReadError();
+      return plVariant();
+    }
     
     // If we determined an expected type, validate it matches
     if (expectedVariantType != plVariant::TypeDeduction<void>::value && 
@@ -953,6 +939,7 @@ plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* 
       {
         plLog::Warning("PL Net: RPC argument type mismatch - expected {}, got {}. Possible attack or version mismatch.",
           static_cast<int>(expectedVariantType), static_cast<int>(variantType));
+        msg.MarkReadError();
         return plVariant();
       }
     }
@@ -1014,6 +1001,7 @@ plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* 
 
     default:
       plLog::Warning("PL Net: Unsupported variant type {} in RPC deserialization", static_cast<int>(variantType));
+      msg.MarkReadError();
       return plVariant();
   }
 }

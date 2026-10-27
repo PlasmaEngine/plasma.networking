@@ -307,7 +307,7 @@ void plNetworkedTransformComponent::HandleTransformStateMessage(plNetworkMessage
   const plQuat qRot = (uiFlags & FullPrecision) != 0 ? msg.ReadQuat() : msg.ReadQuatSmallestThree();
   const plVec3 vVel = (uiFlags & HasVelocity) == 0 ? plVec3::MakeZero() :
     ((uiFlags & FullPrecision) != 0 ? msg.ReadVec3() : msg.ReadVec3Half());
-  if (msg.HasReadError())
+  if (msg.HasReadError() || !vPos.IsValid() || !qRot.IsValid() || !vVel.IsValid())
     return;
 
   m_vReplicatedPosition = vPos;

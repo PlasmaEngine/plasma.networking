@@ -1,10 +1,10 @@
 #include <NetworkPlugin/NetworkPluginPCH.h>
 
-#include <NetworkPlugin/Core/NetworkSession.h>
-#include <NetworkPlugin/Core/NetworkMessages.h>
-#include <NetworkPlugin/WorldModule/NetworkWorldModule.h>
-#include <NetworkPlugin/Core/NetworkLevelManager.h>
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
+#include <NetworkPlugin/Core/NetworkLevelManager.h>
+#include <NetworkPlugin/Core/NetworkMessages.h>
+#include <NetworkPlugin/Core/NetworkSession.h>
+#include <NetworkPlugin/WorldModule/NetworkWorldModule.h>
 
 #include <Foundation/Utilities/ConversionUtils.h>
 #include <GameEngine/PlatformServices/PlatformServices.h>
@@ -41,6 +41,7 @@ void plNetworkSession::Shutdown()
   m_bPendingClientStart = false;
   m_uiLobbyOperationId = 0;
   LeavePlatformLobby();
+
   if (m_pLiveness != nullptr)
   {
     m_pLiveness->m_bAlive = false;
@@ -155,8 +156,7 @@ void plNetworkSession::Update()
 
   SetSessionState(plNetworkSessionState::Lobby);
 
-  plLog::Info("PL Net Session: Joining session from lobby '{}' at '{}' via {}.",
-    m_LobbyId.m_sId, m_PendingConfig.m_sServerAddress, DriverName(m_PendingConfig.m_DriverType));
+  plLog::Info("PL Net Session: Joining session from lobby '{}' at '{}' via {}.", m_LobbyId.m_sId, m_PendingConfig.m_sServerAddress, DriverName(m_PendingConfig.m_DriverType));
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -196,6 +196,7 @@ bool plNetworkSession::JoinViaLobby(const plNetworkConfig& config)
   m_uiLobbyOperationId = pOp != nullptr ? pOp->GetId() : 0;
 
   plLog::Info("PL Net Session: Joining platform lobby '{}'...", config.m_sLobbyId);
+
   return true;
 }
 
@@ -229,6 +230,7 @@ void plNetworkSession::OnLobbyCreated(const plPlatformOperation& op)
   // Delivered from plPlatformServices::Update(), outside the world update: only hub and session-local state here.
   plPlatformServices* pHub = plPlatformServices::GetInstance();
   const bool bStale = op.GetId() != m_uiLobbyOperationId;
+
   if (!bStale)
   {
     m_uiLobbyOperationId = 0;
@@ -259,8 +261,10 @@ void plNetworkSession::OnLobbyCreated(const plPlatformOperation& op)
   {
     const plString sAddress = BuildLocalSessionAddress();
     const plDriverTypeEnum::Enum driverType = m_pNetworkModule && m_pNetworkModule->GetPeer() ? m_pNetworkModule->GetPeer()->m_Config.m_DriverType : plDriverTypeEnum::ENet;
+
     pHub->Lobbies().SetAttribute(s_szLobbyAddressKey, sAddress);
     pHub->Lobbies().SetAttribute(s_szLobbyDriverKey, DriverName(driverType));
+
     plLog::Info("PL Net Session: Platform lobby '{}' created, advertising '{}' via {}.", m_LobbyId.m_sId, sAddress, DriverName(driverType));
   }
 }
@@ -270,6 +274,7 @@ void plNetworkSession::OnLobbyJoined(const plPlatformOperation& op)
   // Delivered from plPlatformServices::Update(), outside the world update: StartClient is deferred to Update().
   plPlatformServices* pHub = plPlatformServices::GetInstance();
   const bool bStale = op.GetId() != m_uiLobbyOperationId;
+
   if (!bStale)
   {
     m_uiLobbyOperationId = 0;
@@ -294,6 +299,7 @@ void plNetworkSession::OnLobbyJoined(const plPlatformOperation& op)
   }
 
   const plPlatformLobbyInfo& lobby = op.GetResult().m_Lobby;
+
   m_LobbyId = lobby.m_Id;
   m_bInPlatformLobby = true;
 
@@ -316,14 +322,16 @@ void plNetworkSession::OnLobbyJoined(const plPlatformOperation& op)
   }
   else
   {
-    // "<host>:<port>"; a missing or unparsable port keeps the configured one.
     m_PendingConfig.m_DriverType = plDriverTypeEnum::ENet;
+
+    // "<host>:<port>"; a missing or unparsable port keeps the configured one.
     const char* szPortSeparator = sAddress.FindLastSubString(":");
     if (szPortSeparator != nullptr)
     {
       const plStringView sHost(sAddress.GetStartPointer(), szPortSeparator);
       const plStringView sPort(szPortSeparator + 1, sAddress.GetEndPointer());
       plUInt32 uiPort = 0;
+
       if (!sHost.IsEmpty() && plConversionUtils::StringToUInt(sPort, uiPort).Succeeded() && uiPort <= plMath::MaxValue<plUInt16>())
       {
         m_PendingConfig.m_sServerAddress = sHost;
@@ -388,6 +396,7 @@ plSharedPtr<plNetworkSession::Liveness> plNetworkSession::GetLiveness()
   {
     m_pLiveness = PL_DEFAULT_NEW(Liveness);
   }
+
   return m_pLiveness;
 }
 

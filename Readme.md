@@ -13,7 +13,8 @@ Package.plPackage           the manifest - identity, compatibility, components
 NetworkPlugin.plPluginBundle legacy descriptor, kept until the engine reads manifests directly
 Source/
   NetworkPlugin/            runtime -> plNetworkPlugin
-  EditorPluginNetworking/   editor  -> plEditorPluginNetworking  (Qt)
+  EditorPluginNetworking/   editor  -> plEditorPluginNetworking
+EditorIcons/                editor icons, registered as an icon folder by the editor plugin
 Tests/                      the network test suite, moved here with the code it exercises
 Configs/                    build rules for building against an installed engine SDK
 Branding/                   icon and banner

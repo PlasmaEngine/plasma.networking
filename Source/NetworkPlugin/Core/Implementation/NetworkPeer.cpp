@@ -42,6 +42,8 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
     return PL_FAILURE;
 
   m_Config = config;
+  if (config.m_uiMessageSize == 0 || config.m_uiMessagePoolSize == 0 || config.m_uiConnectionLimit == 0)
+    return PL_FAILURE;
 
   m_pDriver = CreateDriver(m_Config.m_DriverType);
   if (!m_pDriver)
@@ -71,6 +73,7 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
     if (!m_pDriver || m_pDriver->Initalize(this, m_Config).Failed())
     {
       plLog::Error("PL Net: Failed to initialize network driver");
+      Shutdown();
       return PL_FAILURE;
     }
   }
@@ -89,6 +92,8 @@ void plNetworkPeer::Shutdown()
   PL_DEFAULT_DELETE(m_pDriver);
 
   DestroyMessageBuffers();
+  m_OutgoingBuffer.Clear();
+  m_MessagePool.Clear();
 
   m_pDriver = nullptr;
 }

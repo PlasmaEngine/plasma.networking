@@ -57,7 +57,7 @@ public:
   void RequestLevelLoad(const plString& sLevelPath, float fTimeoutSeconds = 30.0f);
 
   /// @brief (Server) Handle a LevelLoadComplete message from a client
-  void HandleLevelLoadComplete(plUInt32 uiClientID);
+  void HandleLevelLoadComplete(plUInt32 uiClientID, plUInt64 uiGeneration);
 
   /// @brief (Server) Sync level state to a late-joining client
   void SyncLevelToClient(plUInt32 uiClientID);
@@ -69,13 +69,13 @@ public:
   /// @brief (Client) Handle an incoming LevelLoad message
   /// The game should connect to OnLevelLoadRequested to actually load the level,
   /// then call NotifyLoadComplete() when done.
-  void HandleLevelLoadMessage(const plString& sLevelPath);
+  void HandleLevelLoadMessage(const plString& sLevelPath, plUInt64 uiGeneration);
 
   /// @brief (Client) Notify the server that level loading is complete
   void NotifyLoadComplete();
 
   /// @brief (Client) Handle an incoming LevelStart message
-  void HandleLevelStartMessage();
+  void HandleLevelStartMessage(plUInt64 uiGeneration);
 
   //////////////////////////////////////////////////////////////////////////
   // State Queries
@@ -86,6 +86,7 @@ public:
 
   /// @brief Get the path of the currently loading or loaded level
   PL_NODISCARD const plString& GetCurrentLevelPath() const { return m_sCurrentLevelPath; }
+  plUInt64 GetLoadGeneration() const { return m_uiLoadGeneration; }
 
   /// @brief (Server) Check if all connected clients have finished loading
   PL_NODISCARD bool AreAllClientsLoaded() const;
@@ -101,6 +102,7 @@ private:
 
   plNetworkLevelState::Enum m_State = plNetworkLevelState::None;
   plString m_sCurrentLevelPath;
+  plUInt64 m_uiLoadGeneration = 0;
 
   // Server-side tracking
   plSet<plUInt32> m_PendingClients;    ///< Clients that have not yet acked load

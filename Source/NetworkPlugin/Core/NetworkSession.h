@@ -179,11 +179,16 @@ private:
   /// @brief Ready state per client ID (host-authoritative)
   plHashTable<plUInt32, bool> m_ReadyStates;
 
+  /// @brief Platform lobby this session created or joined
   plPlatformLobbyId m_LobbyId;
   bool m_bInPlatformLobby = false;
+
+  /// @brief Lobby join in progress; m_PendingConfig starts the client on the next Update()
   bool m_bJoiningLobby = false;
   bool m_bPendingClientStart = false;
   plNetworkConfig m_PendingConfig;
-  plUInt64 m_uiLobbyOperationId = 0; ///< Id of the outstanding Create/Join; stale completions are ignored
+
+  /// @brief Id of the outstanding lobby Create/Join; stale completions are ignored
+  plUInt64 m_uiLobbyOperationId = 0;
   plSharedPtr<Liveness> m_pLiveness;
 };

@@ -128,6 +128,8 @@ public:
 
   /// \brief The size of the message pool. Beyond this will case crashes.
   plUInt16 m_uiMessagePoolSize = 2048;
+  /// \brief Maximum time for an unadmitted connection to complete its handshake.
+  float m_fHandshakeTimeoutSeconds = 10.0f;
 
   /// \brief Platform lobby to join; when set, plNetworkSession::JoinSession resolves the address from the lobby.
   plString m_sLobbyId;
@@ -187,7 +189,7 @@ public:
   PL_ALWAYS_INLINE bool operator==(const plNetworkConnection& other) const { return m_uiConnectionID == other.m_uiConnectionID; }
 
   /// \brief Id of the active connection
-  plUInt32 m_uiConnectionID;
+  plUInt32 m_uiConnectionID = 0;
 };
 
 struct PL_NETWORKPLUGIN_DLL plNetworkStats : public plReflectedClass

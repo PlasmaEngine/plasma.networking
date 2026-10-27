@@ -2,8 +2,7 @@
 
 #include <EditorPluginNetworking/Assets/NetworkProfileAsset.h>
 #include <EditorPluginNetworking/Assets/NetworkProfileAssetManager.h>
-#include <EditorPluginNetworking/Assets/NetworkProfileAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginNetworking/Assets/NetworkProfileAssetWindow.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plNetworkProfileAssetDocumentManager, 1, plRTTIDefaultAllocator<plNetworkProfileAssetDocumentManager>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -20,7 +19,6 @@ plNetworkProfileAssetDocumentManager::plNetworkProfileAssetDocumentManager()
   m_DocTypeDesc.m_CompatibleTypes.PushBack("CompatibleAsset_NetworkReplicationProfile");
   m_DocTypeDesc.m_sResourceFileExtension = "plNetworkProfile";
   m_DocTypeDesc.m_AssetDocumentFlags = plAssetDocumentFlags::AutoTransformOnSave;
-  plQtImageCache::GetSingleton()->RegisterTypeImage("NetworkReplicationProfile", QPixmap(m_DocTypeDesc.m_sIcon.GetData()));
 }
 
 plNetworkProfileAssetDocumentManager::~plNetworkProfileAssetDocumentManager()
@@ -32,7 +30,7 @@ void plNetworkProfileAssetDocumentManager::OnDocumentManagerEvent(const plDocume
 {
   if (e.m_Type == plDocumentManager::Event::Type::DocumentWindowRequested &&
       e.m_pDocument->GetDynamicRTTI() == plGetStaticRTTI<plNetworkProfileAssetDocument>())
-    new plQtNetworkProfileAssetDocumentWindow(e.m_pDocument);
+    new plNetworkProfileAssetDocumentWindow(e.m_pDocument);
 }
 
 void plNetworkProfileAssetDocumentManager::InternalCreateDocument(plStringView sDocumentTypeName, plStringView sPath,

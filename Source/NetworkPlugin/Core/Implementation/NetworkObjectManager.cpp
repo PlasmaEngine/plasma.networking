@@ -124,8 +124,9 @@ plUInt32 plNetworkObjectManager::SpawnNetworkObject(
   // Check if prefab is registered
   if (!IsNetworkPrefab(sPrefabGuid))
   {
+    // Clients only accept registered prefab IDs, so an unregistered spawn would disconnect every client.
     plLog::Warning("PL Net: Prefab '{}' is not registered for network spawning", sPrefabGuid.GetString());
-    // Still allow spawning, but warn
+    return 0;
   }
 
   // Generate network ID first so components can use it during spawn
@@ -449,12 +450,6 @@ void plNetworkObjectManager::BroadcastSpawn(const plNetworkObjectInfo& info, con
   m_RegisteredPrefabs.TryGetValue(info.m_sPrefabGuid, prefabID);
   msg.WriteUInt32(prefabID);
 
-  // Write full GUID if not registered (fallback)
-  if (prefabID == 0)
-  {
-    msg.WriteString(info.m_sPrefabGuid.GetString());
-  }
-
   // Write transform
   msg.WriteVec3(transform.m_vPosition);
   msg.WriteQuat(transform.m_qRotation);
@@ -484,11 +479,6 @@ void plNetworkObjectManager::SendSpawnToClient(const plNetworkObjectInfo& info, 
   plUInt32 prefabID = 0;
   m_RegisteredPrefabs.TryGetValue(info.m_sPrefabGuid, prefabID);
   msg.WriteUInt32(prefabID);
-
-  if (prefabID == 0)
-  {
-    msg.WriteString(info.m_sPrefabGuid.GetString());
-  }
 
   msg.WriteVec3(transform.m_vPosition);
   msg.WriteQuat(transform.m_qRotation);
@@ -532,7 +522,7 @@ void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
     return;
 
   // Only clients should handle spawn messages
-  if (m_pNetworkModule->IsServer())
+  if (!m_pNetworkModule->IsClient())
     return;
 
   plUInt32 networkID = msg.ReadUInt32();
@@ -557,12 +547,20 @@ void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
   }
   else
   {
-    prefabGuid.Assign(msg.ReadString().GetData());
+    // Remote paths are not an asset whitelist. Both peers must register the prefab ID.
+    msg.MarkReadError();
+    return;
   }
 
   plVec3 position = msg.ReadVec3();
   plQuat rotation = msg.ReadQuat();
   plVec3 scale = msg.ReadVec3();
+  if (msg.HasReadError() || networkID == 0 || authority > plNetworkObjectRole::ReplicatedSimulated ||
+      !position.IsValid() || !rotation.IsValid() || !scale.IsValid())
+  {
+    msg.MarkReadError();
+    return;
+  }
 
   plTransform transform;
   transform.m_vPosition = position;
@@ -628,10 +626,12 @@ void plNetworkObjectManager::HandleDespawnMessage(plNetworkMessage& msg)
     return;
 
   // Only clients should handle despawn messages
-  if (m_pNetworkModule->IsServer())
+  if (!m_pNetworkModule->IsClient())
     return;
 
   plUInt32 networkID = msg.ReadUInt32();
+  if (msg.HasReadError())
+    return;
 
   plNetworkObjectInfo* pInfo = nullptr;
   if (!m_NetworkObjects.TryGetValue(networkID, pInfo))
@@ -660,9 +660,16 @@ void plNetworkObjectManager::HandleDespawnMessage(plNetworkMessage& msg)
 
 void plNetworkObjectManager::HandleOwnershipMessage(plNetworkMessage& msg)
 {
+  if (!m_pNetworkModule || !m_pNetworkModule->IsClient())
+    return;
   plUInt32 networkID = msg.ReadUInt32();
   plUInt32 newOwnerClientID = msg.ReadUInt32();
   plNetworkObjectRole::Enum authority = static_cast<plNetworkObjectRole::Enum>(msg.ReadUInt8());
+  if (msg.HasReadError() || authority > plNetworkObjectRole::ReplicatedSimulated)
+  {
+    msg.MarkReadError();
+    return;
+  }
 
   plNetworkObjectInfo* pInfo = nullptr;
   if (!m_NetworkObjects.TryGetValue(networkID, pInfo))

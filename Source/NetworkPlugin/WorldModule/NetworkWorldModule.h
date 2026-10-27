@@ -193,6 +193,8 @@ public:
 
   /// @brief Validate that an incoming state update is authorized
   bool ValidateStateUpdate(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID) const;
+  plNetworkComponent* FindNetworkComponent(plUInt32 uiComponentNetID) const;
+  const plNetworkObjectInfo* FindOwningObject(const plNetworkComponent* pComponent) const;
 
   //////////////////////////////////////////////////////////////////////////
   // Late-Joiner Synchronization
@@ -244,6 +246,7 @@ public:
   void BroadcastToNetworkComponents(plMessage& ref_msg);
 
 private:
+  friend class plNetworkTestAccess;
 
   void OnUpdate(const UpdateContext& ctxt);
 
@@ -282,6 +285,10 @@ private:
   float m_fClientTimeoutSeconds = 30.0f; ///< Disconnect clients after this many seconds of inactivity
   plNetworkConfig m_Config;              ///< Network configuration (address, port, limits)
   plNetworkPeer* m_pPeer = nullptr;
+  bool m_bUpdating = false;
+  bool m_bStopping = false;
+  bool m_bStopRequested = false;
+  plNetworkDisconnectReason::Enum m_DeferredStopReason = plNetworkDisconnectReason::ClientQuit;
   plEnum<plNetworkRoleEnum> m_Role = plNetworkRoleEnum::Undefined;
   plEnum<plNetworkConnectionState> m_Status = plNetworkConnectionState::Disconnected;
   plUInt32 m_uiServerClientID = 0;
