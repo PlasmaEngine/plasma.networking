@@ -77,6 +77,7 @@ namespace NetworkTestHarness
       m_pModule->SetTickRate(0.0f);
       plGameObjectDesc desc;
       desc.m_sName.Assign("Replicated");
+      desc.m_bDynamic = true;
       plGameObject* pObject = nullptr;
       m_World.CreateObject(desc, pObject);
       m_World.GetOrCreateComponentManager<plNetworkSecurityComponentManager>()->CreateComponent(pObject, m_pComponent);

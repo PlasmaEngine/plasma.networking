@@ -264,6 +264,10 @@ namespace
 
   plUInt32 CountFreeMessages(plNetworkPeer* pPeer)
   {
+    // Draining the pool on purpose logs an error when it runs dry.
+    plMuteLog mute;
+    plLogSystemScope logScope(&mute);
+
     plDynamicArray<plNetworkMessage> messages;
     for (plNetworkMessage message = pPeer->CreateMessage(); message.IsValid(); message = pPeer->CreateMessage())
       messages.PushBack(message);

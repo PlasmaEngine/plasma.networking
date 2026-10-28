@@ -86,6 +86,10 @@ namespace
   {
     plNetworkWorldModule* pModule = endpoint.m_pModule;
 
+    // Rejecting hostile input is logged as an error; the test framework would count each one as a failure.
+    plMuteLog mute;
+    plLogSystemScope logScope(&mute);
+
     for (plUInt32 i = 0; i < uiIterations; ++i)
     {
       plUInt8 bytes[96] = {};
@@ -221,6 +225,9 @@ PL_CREATE_SIMPLE_TEST(Network, ParserFuzz)
     const auto* pRpc = pModule->GetRpcManager()->GetRpcInfo(endpoint.m_pComponent->GetDynamicRTTI(), "SetValue");
     if (!PL_TEST_BOOL(pRpc != nullptr))
       return;
+
+    plMuteLog mute;
+    plLogSystemScope logScope(&mute);
 
     for (plUInt32 uiType = 0; uiType < 256; ++uiType)
     {
