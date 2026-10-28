@@ -63,16 +63,7 @@ bool plNetworkComponent::IsLocallyOwned() const
 
   // Owner client ID 0 is the server itself, so "no entry" must be told apart
   // from "owned by the server" via the object info, not the owner id value.
-  const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(m_uiNetID);
-  if (pInfo == nullptr)
-  {
-    // Per-component NetIDs (derived from the spawn object id) are not registered in the object table.
-    const plUInt32 uiObjectNetID = pObjectManager->GetNetworkID(GetOwner()->GetHandle());
-    if (uiObjectNetID != 0)
-    {
-      pInfo = pObjectManager->GetObjectInfo(uiObjectNetID);
-    }
-  }
+  const plNetworkObjectInfo* pInfo = m_pNetworkModule->FindOwningObject(this);
 
   if (pInfo == nullptr)
     return false;

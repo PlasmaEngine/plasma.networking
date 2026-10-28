@@ -82,8 +82,8 @@ public static class PlasmaPackageSdk
 
         rules.PublicDefinitions.Add("BUILDSYSTEM_COMPILE_ENGINE_AS_DLL");
         rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_MAJOR=0");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_MINOR=8");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_PATCH=0");
+        rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_MINOR=11");
+        rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_PATCH=2");
         rules.PublicDefinitions.Add("UNICODE");
         rules.PublicDefinitions.Add("_UNICODE");
 
@@ -198,7 +198,7 @@ public static class PlasmaPackageSdk
         rules.PublicDefinitions.Add("JPH_DEBUG_RENDERER");
 
         rules.PublicLibraries.Add(Path.Combine(joltRoot, "Bin",
-            $"{context.Platform}_x64_{context.Configuration}", "plJoltPlugin.lib"));
+            $"{context.Platform}_x64_{context.Configuration}", LibraryFileName(context, "plJoltPlugin")));
     }
 
     /// \brief Locates a sibling package checkout.
@@ -291,17 +291,26 @@ public static class PlasmaPackageSdk
         {
             rules.PrivateLibraries.Add(Path.Combine(PackageBinaryDirectory(context), outputName + ".lib"));
         }
+        else
+        {
+            rules.PrivateLibraries.Add(Path.Combine(PackageBinaryDirectory(context), LibraryFileName(context, outputName)));
+        }
     }
 
     public static void AddImportLibrary(ModuleRules rules, BuildContext context, string outputName)
     {
         var library = Path.Combine(SdkBinaryDirectory(context),
-            outputName + (context.Platform == TargetPlatform.Windows ? ".lib" : ".so"));
+            LibraryFileName(context, outputName));
 
         if (File.Exists(library))
         {
             rules.PublicLibraries.Add(library);
         }
+    }
+
+    private static string LibraryFileName(BuildContext context, string outputName)
+    {
+        return context.Platform == TargetPlatform.Windows ? outputName + ".lib" : "lib" + outputName + ".so";
     }
 
     private static void AddSdkThirdPartyIncludePaths(ModuleRules rules)

@@ -5,8 +5,8 @@ PluginInfo
 {
 	string %DisplayName{"Networking Plugin"}
 	string %Category{"Networking"}
-	string %MinEngineVersion{"0.7.0"}
-	string %MaxEngineVersion{"0.7.0"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
     string %Icon{"NetworkingIcon.png"}
     string %Banner{"NetworkingBanner.png"}
 	string %Description{"Adds a networking framework to the engine."}

@@ -9,7 +9,6 @@
 
 class PL_NETWORKPLUGIN_DLL plDriverEnet : public plNetworkDriverInterface
 {
-  PL_DECLARE_SINGLETON_OF_INTERFACE(plDriverEnet, plNetworkDriverInterface);
 public:
   plDriverEnet();
   virtual ~plDriverEnet() = default;
@@ -40,6 +39,7 @@ public:
   virtual plNetworkStats GetStats(plNetworkConnection target) const override;
 
 private:
+  friend class plNetworkTestAccess;
   bool IsServer() const;
 private:
   plNetworkConfig m_Config;
@@ -47,4 +47,7 @@ private:
   ENetHost* m_pEnetHost = nullptr;
   ENetPeer* m_pEnetPeer = nullptr;
   plMap<plUInt32, ENetPeer*> m_PeerMap;
+  plMap<ENetPeer*, plUInt32> m_ConnectionIDs;
+  plUInt64 m_uiNextConnectionID = 1; // Never reuse an identity within this driver generation.
+  bool m_bInitialized = false;
 };

@@ -11,10 +11,30 @@
 #if BUILDSYSTEM_ENABLE_ENET_SUPPORT
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 #endif
+#include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
 
 plDynamicArray<plNetworkPeer*> plNetworkPeer::m_Peers;
 
 plUInt32 lastHostID = 0;
+
+namespace
+{
+  plNetworkDriverInterface* CreateDriver(plDriverTypeEnum::Enum driverType)
+  {
+    switch (driverType)
+    {
+#if BUILDSYSTEM_ENABLE_ENET_SUPPORT
+      case plDriverTypeEnum::ENet:
+        return PL_DEFAULT_NEW(plDriverEnet);
+#endif
+      case plDriverTypeEnum::Platform:
+        return PL_DEFAULT_NEW(plDriverPlatform);
+      default:
+        plLog::Error("No network driver enabled");
+        return nullptr;
+    }
+  }
+} // namespace
 
 plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
 {
@@ -22,22 +42,13 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
     return PL_FAILURE;
 
   m_Config = config;
+  if (config.m_uiMessageSize == 0 || config.m_uiMessagePoolSize == 0 || config.m_uiConnectionLimit == 0)
+    return PL_FAILURE;
 
-  switch (m_Config.m_DriverType)
+  m_pDriver = CreateDriver(m_Config.m_DriverType);
+  if (!m_pDriver)
   {
-#if BUILDSYSTEM_ENABLE_ENET_SUPPORT
-    case plDriverTypeEnum::ENet:
-    {
-      m_pDriver = PL_DEFAULT_NEW(plDriverEnet);
-      break;
-    }
-#endif
-    default:
-    {
-      plLog::Error("No network driver enabled");
-      m_pDriver = nullptr;
-      break;
-    }
+    return PL_FAILURE;
   }
 
   CreateMessageBuffers();
@@ -50,8 +61,21 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
 
   if(m_pDriver->Initalize(this, m_Config).Failed())
   {
-    plLog::Error("PL Net: Failed to initialize network driver");
-    return PL_FAILURE;
+    // The Platform driver needs a backend with a transport; without one the peer runs on ENet instead.
+    if (m_Config.m_DriverType == plDriverTypeEnum::Platform)
+    {
+      plLog::Warning("PL Net: Platform transport unavailable, falling back to the ENet driver");
+      PL_DEFAULT_DELETE(m_pDriver);
+      m_Config.m_DriverType = plDriverTypeEnum::ENet;
+      m_pDriver = CreateDriver(m_Config.m_DriverType);
+    }
+
+    if (!m_pDriver || m_pDriver->Initalize(this, m_Config).Failed())
+    {
+      plLog::Error("PL Net: Failed to initialize network driver");
+      Shutdown();
+      return PL_FAILURE;
+    }
   }
 
   plStringBuilder sTmp;
@@ -68,6 +92,8 @@ void plNetworkPeer::Shutdown()
   PL_DEFAULT_DELETE(m_pDriver);
 
   DestroyMessageBuffers();
+  m_OutgoingBuffer.Clear();
+  m_MessagePool.Clear();
 
   m_pDriver = nullptr;
 }

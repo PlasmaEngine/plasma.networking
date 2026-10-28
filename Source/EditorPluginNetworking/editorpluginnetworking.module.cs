@@ -11,7 +11,8 @@ public class EditorPluginNetworkingModule : ModuleRules
         PlasmaPackageSdk.ConfigureEditorSdkConsumer(this, context);
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/NetworkPlugin", "plNetworkPlugin");
 
-        PlasmaPackageQt.ConfigureQtModule(this, context, "EditorPluginNetworkingModule",
-            "Source/EditorPluginNetworking", "Core", "Gui", "Widgets");
+        // Context menu items and the icon folder are EditorUi's.
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plEditorUi");
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plGameUiPlugin");
     }
 }

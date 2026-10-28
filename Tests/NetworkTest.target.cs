@@ -1,3 +1,4 @@
+using System.IO;
 using PlasmaBuild.Core.Configuration;
 using PlasmaBuild.Core.Rules;
 
@@ -6,14 +7,13 @@ public class NetworkTestTarget : TargetRules
     public NetworkTestTarget(BuildContext context) : base(context)
     {
         Type = TargetType.Executable;
+        OutputName = "NetworkTest";
+        OutputDirectory = Path.Combine(context.ProjectRoot, "Bin", "Tests", $"{context.Platform}_x64_{context.Configuration}");
         UsePCHFiles = true;
         UseUnityBuild = true;
         UseAdaptiveUnityBuild = true;
-        UseIncrementalLinking = true;
-        TargetDependencies.Add("TestFramework");
+        GenerateDebugInfo = true;
         TargetDependencies.Add("NetworkPlugin");
-        TargetDependencies.Add("RendererVulkan");
         ExtraModules.Add("NetworkTestModule");
-        PlasmaBuildQt.AddQtRuntimeDeployment(this, context);
     }
 }

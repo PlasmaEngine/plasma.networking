@@ -153,6 +153,7 @@ public:
   void SyncAllObjectsToClient(plUInt32 uiClientID);
 
 private:
+  friend class plNetworkTestAccess;
   /// @brief Generate a unique network ID
   plUInt32 GenerateNetworkID();
 

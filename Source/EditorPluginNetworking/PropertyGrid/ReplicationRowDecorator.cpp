@@ -2,12 +2,9 @@
 
 #include <EditorPluginNetworking/PropertyGrid/ReplicationRowDecorator.h>
 
-#include <GuiFoundation/PropertyGrid/PropertyBaseWidget.moc.h>
+#include <EditorUi/MenuBuilder.h>
 #include <ToolsFoundation/Document/Document.h>
 #include <ToolsFoundation/Object/ObjectAccessorBase.h>
-
-#include <QAction>
-#include <QMenu>
 
 namespace
 {
@@ -42,14 +39,31 @@ namespace
         return false;
     }
   }
-}
+} // namespace
 
-bool plQtNetworkReplicationRowDecorator::IsEligible(plQtPropertyWidget* pWidget)
+bool plNetworkReplicationRowDecorator::CanDecorate(const plPropertyGridModel::Row& row)
 {
-  if (!plQtNetworkReplicationRowDecorator().CanDecorate(pWidget) || pWidget->GetSelection().IsEmpty())
+  const plAbstractProperty* pProperty = row.m_pProperty;
+  if (pProperty == nullptr || row.m_pType == nullptr || row.m_pAccessor == nullptr)
     return false;
 
-  for (const plPropertySelection& selection : pWidget->GetSelection())
+  // Element rows of containers are not replicated on their own.
+  if (!row.m_Items.IsEmpty() && row.m_Items[0].m_Index.IsValid())
+    return false;
+
+  if (pProperty->GetCategory() == plPropertyCategory::Set && plStringUtils::IsEqual(pProperty->GetPropertyName(), "Tags"))
+    return true;
+  if (pProperty->GetCategory() != plPropertyCategory::Member || pProperty->GetFlags().IsAnySet(plPropertyFlags::ReadOnly | plPropertyFlags::Pointer))
+    return false;
+  return pProperty->GetFlags().IsSet(plPropertyFlags::IsEnum) || IsSupportedVariantType(pProperty->GetSpecificType()->GetVariantType());
+}
+
+bool plNetworkReplicationRowDecorator::IsEligible(const plPropertyGridModel::Row& row)
+{
+  if (!CanDecorate(row) || row.m_Items.IsEmpty())
+    return false;
+
+  for (const plPropertySelection& selection : row.m_Items)
   {
     if (IsGameObject(selection.m_pObject))
       continue;
@@ -59,19 +73,7 @@ bool plQtNetworkReplicationRowDecorator::IsEligible(plQtPropertyWidget* pWidget)
   return true;
 }
 
-bool plQtNetworkReplicationRowDecorator::CanDecorate(plQtPropertyWidget* pWidget) const
-{
-  if (pWidget == nullptr || pWidget->GetType() == nullptr || pWidget->GetProperty() == nullptr)
-    return false;
-  const plAbstractProperty* pProperty = pWidget->GetProperty();
-  if (pProperty->GetCategory() == plPropertyCategory::Set && plStringUtils::IsEqual(pProperty->GetPropertyName(), "Tags"))
-    return true;
-  if (pProperty->GetCategory() != plPropertyCategory::Member || pProperty->GetFlags().IsAnySet(plPropertyFlags::ReadOnly | plPropertyFlags::Pointer))
-    return false;
-  return pProperty->GetFlags().IsSet(plPropertyFlags::IsEnum) || IsSupportedVariantType(pProperty->GetSpecificType()->GetVariantType());
-}
-
-const plDocumentObject* plQtNetworkReplicationRowDecorator::FindReplicationComponent(const plDocumentObject* pComponent)
+const plDocumentObject* plNetworkReplicationRowDecorator::FindReplicationComponent(const plDocumentObject* pComponent)
 {
   const plDocumentObject* pGameObject = IsGameObject(pComponent) ? pComponent : (pComponent != nullptr ? pComponent->GetParent() : nullptr);
   if (pGameObject == nullptr)
@@ -85,7 +87,7 @@ const plDocumentObject* plQtNetworkReplicationRowDecorator::FindReplicationCompo
   return nullptr;
 }
 
-plUInt8 plQtNetworkReplicationRowDecorator::GetComponentTypeIndex(const plDocumentObject* pComponent)
+plUInt8 plNetworkReplicationRowDecorator::GetComponentTypeIndex(const plDocumentObject* pComponent)
 {
   if (IsGameObject(pComponent))
     return 0;
@@ -101,7 +103,7 @@ plUInt8 plQtNetworkReplicationRowDecorator::GetComponentTypeIndex(const plDocume
   return uiIndex;
 }
 
-const plDocumentObject* plQtNetworkReplicationRowDecorator::FindEntry(
+const plDocumentObject* plNetworkReplicationRowDecorator::FindEntry(
   plObjectAccessorBase* pAccessor, const plDocumentObject* pComponent, const plAbstractProperty* pProperty)
 {
   const plDocumentObject* pReplication = FindReplicationComponent(pComponent);
@@ -130,7 +132,7 @@ const plDocumentObject* plQtNetworkReplicationRowDecorator::FindEntry(
   return nullptr;
 }
 
-bool plQtNetworkReplicationRowDecorator::AddEntry(
+bool plNetworkReplicationRowDecorator::AddEntry(
   plObjectAccessorBase* pAccessor, const plDocumentObject* pComponent, const plAbstractProperty* pProperty)
 {
   if (FindEntry(pAccessor, pComponent, pProperty) != nullptr)
@@ -170,45 +172,43 @@ bool plQtNetworkReplicationRowDecorator::AddEntry(
          pAccessor->SetValueByName(pEntry, "Property", plString(pProperty->GetPropertyName())).Succeeded();
 }
 
-bool plQtNetworkReplicationRowDecorator::RemoveEntry(
+bool plNetworkReplicationRowDecorator::RemoveEntry(
   plObjectAccessorBase* pAccessor, const plDocumentObject* pComponent, const plAbstractProperty* pProperty)
 {
   const plDocumentObject* pEntry = FindEntry(pAccessor, pComponent, pProperty);
   return pEntry == nullptr || pAccessor->RemoveObject(pEntry).Succeeded();
 }
 
-bool plQtNetworkReplicationRowDecorator::GetState(
-  plQtPropertyWidget* pWidget, bool& out_bActive, bool& out_bMixed, plStringBuilder& out_sTooltip) const
+bool plNetworkReplicationRowDecorator::GetState(
+  const plPropertyGridModel::Row& row, bool& out_bActive, bool& out_bMixed, plStringBuilder& out_sTooltip) const
 {
-  if (!IsEligible(pWidget))
+  if (!IsEligible(row))
     return false;
 
   plUInt32 uiReplicated = 0;
-  for (const plPropertySelection& selection : pWidget->GetSelection())
+  for (const plPropertySelection& selection : row.m_Items)
   {
-    if (FindEntry(pWidget->GetObjectAccessor(), selection.m_pObject, pWidget->GetProperty()) != nullptr)
+    if (FindEntry(row.m_pAccessor, selection.m_pObject, row.m_pProperty) != nullptr)
       ++uiReplicated;
   }
 
-  out_bActive = uiReplicated == pWidget->GetSelection().GetCount();
-  out_bMixed = uiReplicated > 0 && uiReplicated < pWidget->GetSelection().GetCount();
-  out_sTooltip = out_bMixed ? "Mixed replication state — click to replicate all" :
-    (out_bActive ? "Replicated — click to stop replicating" : "Not replicated — click to replicate");
+  out_bActive = uiReplicated == row.m_Items.GetCount();
+  out_bMixed = uiReplicated > 0 && uiReplicated < row.m_Items.GetCount();
+  out_sTooltip = out_bMixed ? "Mixed replication state \xE2\x80\x94 click to replicate all" : (out_bActive ? "Replicated \xE2\x80\x94 click to stop replicating" : "Not replicated \xE2\x80\x94 click to replicate");
   return true;
 }
 
-void plQtNetworkReplicationRowDecorator::SetReplicated(plQtPropertyWidget* pWidget, bool bReplicated)
+void plNetworkReplicationRowDecorator::SetReplicated(const plPropertyGridModel::Row& row, bool bReplicated)
 {
-  if (!IsEligible(pWidget))
+  if (!IsEligible(row))
     return;
 
-  plObjectAccessorBase* pAccessor = pWidget->GetObjectAccessor();
+  plObjectAccessorBase* pAccessor = row.m_pAccessor;
   pAccessor->StartTransaction(bReplicated ? "Replicate Property" : "Stop Replicating Property");
   bool bSuccess = true;
-  for (const plPropertySelection& selection : pWidget->GetSelection())
+  for (const plPropertySelection& selection : row.m_Items)
   {
-    bSuccess &= bReplicated ? AddEntry(pAccessor, selection.m_pObject, pWidget->GetProperty()) :
-                              RemoveEntry(pAccessor, selection.m_pObject, pWidget->GetProperty());
+    bSuccess &= bReplicated ? AddEntry(pAccessor, selection.m_pObject, row.m_pProperty) : RemoveEntry(pAccessor, selection.m_pObject, row.m_pProperty);
   }
 
   if (bSuccess)
@@ -217,39 +217,36 @@ void plQtNetworkReplicationRowDecorator::SetReplicated(plQtPropertyWidget* pWidg
     pAccessor->CancelTransaction();
 }
 
-void plQtNetworkReplicationRowDecorator::Toggle(plQtPropertyWidget* pWidget)
+void plNetworkReplicationRowDecorator::Toggle(const plPropertyGridModel::Row& row) const
 {
   bool bActive = false;
   bool bMixed = false;
   plStringBuilder tooltip;
-  if (GetState(pWidget, bActive, bMixed, tooltip))
-    SetReplicated(pWidget, !bActive || bMixed);
+  if (GetState(row, bActive, bMixed, tooltip))
+    SetReplicated(row, !bActive || bMixed);
 }
 
-void plQtNetworkReplicationRowDecorator::ExtendContextMenu(QMenu& ref_menu, plQtPropertyWidget* pWidget)
+void plNetworkReplicationRowDecorator::ExtendMenu(plEditorUiMenuBuilder& ref_menu, const plPropertyGridModel::Row& row, plDocument* pDocument) const
 {
   bool bActive = false;
   bool bMixed = false;
   plStringBuilder tooltip;
-  if (!GetState(pWidget, bActive, bMixed, tooltip))
+  if (!GetState(row, bActive, bMixed, tooltip))
     return;
 
-  ref_menu.addSeparator();
-  QAction* pReplicate = ref_menu.addAction("Replicate Property");
-  pReplicate->setEnabled(!bActive || bMixed);
-  QObject::connect(pReplicate, &QAction::triggered, pReplicate, [pWidget]() { SetReplicated(pWidget, true); });
+  // The menu keeps the row alive until its items have run, so the items can refer to it.
+  ref_menu.AddSeparator();
+  plEditorUiMenuItem& replicate = ref_menu.AddAction("Replicate Property", [&row]()
+    { SetReplicated(row, true); });
+  replicate.m_bEnabled = !bActive || bMixed;
 
-  QAction* pStop = ref_menu.addAction("Stop Replicating");
-  pStop->setEnabled(bActive || bMixed);
-  QObject::connect(pStop, &QAction::triggered, pStop, [pWidget]() { SetReplicated(pWidget, false); });
+  plEditorUiMenuItem& stop = ref_menu.AddAction("Stop Replicating", [&row]()
+    { SetReplicated(row, false); });
+  stop.m_bEnabled = bActive || bMixed;
 
-  if (const plDocumentObject* pEntry = FindEntry(pWidget->GetObjectAccessor(), pWidget->GetSelection()[0].m_pObject, pWidget->GetProperty()))
+  if (const plDocumentObject* pEntry = FindEntry(row.m_pAccessor, row.m_Items[0].m_pObject, row.m_pProperty); pEntry != nullptr && pDocument != nullptr)
   {
-    QAction* pSelect = ref_menu.addAction("Select Replication Entry");
-    QObject::connect(pSelect, &QAction::triggered, pSelect, [pWidget, pEntry]()
-      {
-        if (plDocument* pDocument = const_cast<plDocument*>(pWidget->GetPropertyGrid()->GetDocument()))
-          pDocument->GetSelectionManager()->SetSelection(pEntry);
-      });
+    ref_menu.AddAction("Select Replication Entry", [pDocument, pEntry]()
+      { pDocument->GetSelectionManager()->SetSelection(pEntry); });
   }
 }

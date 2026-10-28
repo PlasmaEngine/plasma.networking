@@ -8,10 +8,12 @@
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 
 
-PL_IMPLEMENT_SINGLETON(plDriverEnet);
+namespace
+{
+  plUInt32 s_uiEnetUsers = 0;
+}
 
 plDriverEnet::plDriverEnet()
-  : m_SingletonRegistrar(this)
 {
 
 }
@@ -22,11 +24,14 @@ plResult plDriverEnet::Initalize(plNetworkPeer* pNetworkPeer, const plNetworkCon
   m_Config = config;
   m_PeerMap.Clear();
 
-  if(enet_initialize() != 0)
+  if(s_uiEnetUsers == 0 && enet_initialize() != 0)
   {
     plLog::Error("ENet: Failed to initialize ENet.");
     return PL_FAILURE;
   }
+
+  ++s_uiEnetUsers;
+  m_bInitialized = true;
 
   plLog::Info("ENet: ENet initialized.");
   return PL_SUCCESS;
@@ -41,9 +46,12 @@ void plDriverEnet::Shutdown()
 
   enet_host_destroy(m_pEnetHost);
 
-  enet_deinitialize();
+  if (m_bInitialized && --s_uiEnetUsers == 0)
+    enet_deinitialize();
+  m_bInitialized = false;
 
   m_PeerMap.Clear();
+  m_ConnectionIDs.Clear();
 
   m_pEnetPeer = nullptr;
   m_pEnetHost = nullptr;
@@ -73,6 +81,10 @@ plResult plDriverEnet::Listen()
   }
 
   plLog::Info("ENet: Host created on port {0}.", m_Config.m_uiServerPort);
+  // ENet checks these limits before allocating packet reassembly storage. Bound pending
+  // payloads independently of the local message pool (at most 64 messages per peer).
+  m_pEnetHost->maximumPacketSize = m_Config.m_uiMessageSize;
+  m_pEnetHost->maximumWaitingData = static_cast<size_t>(m_Config.m_uiMessageSize) * plMath::Min<plUInt16>(m_Config.m_uiMessagePoolSize, 64);
   return PL_SUCCESS;
 }
 
@@ -91,11 +103,14 @@ plResult plDriverEnet::Connect()
     return PL_FAILURE;
   }
 
-  m_pEnetPeer = enet_host_connect(m_pEnetHost, &address, m_Config.m_uiMessageSize, 0);
+  m_pEnetHost->maximumPacketSize = m_Config.m_uiMessageSize;
+  m_pEnetHost->maximumWaitingData = static_cast<size_t>(m_Config.m_uiMessageSize) * plMath::Min<plUInt16>(m_Config.m_uiMessagePoolSize, 64);
+  m_pEnetPeer = enet_host_connect(m_pEnetHost, &address, 1, 0);
   if(!m_pEnetPeer)
   {
     plLog::Error("ENet: Failed to connect.");
     enet_host_destroy(m_pEnetHost);
+    m_pEnetHost = nullptr;
     return PL_FAILURE;
   }
 
@@ -119,7 +134,8 @@ void plDriverEnet::Disconnect(const plNetworkConnection& connection)
 
   if(m_PeerMap.TryGetValue(connection.m_uiConnectionID, peer))
   {
-    enet_peer_disconnect(peer, 0);
+    enet_peer_disconnect_now(peer, 0);
+    m_ConnectionIDs.Remove(peer);
     m_PeerMap.Remove(connection.m_uiConnectionID);
     plLog::Info("ENet: Disconnected Id: {}.", connection.m_uiConnectionID);
   }
@@ -145,7 +161,26 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
     }
 
     ENetPeer* peer = enetEvent.peer;
-    const plUInt32 connectionId = enet_peer_get_id(peer);
+    plUInt32 connectionId = 0; // The remote server is always 0 on a client.
+    if (IsServer())
+    {
+      if (enetEvent.type == ENET_EVENT_TYPE_CONNECT)
+      {
+        if (m_ConnectionIDs.Contains(peer) || m_uiNextConnectionID > plMath::MaxValue<plUInt32>())
+        {
+          enet_peer_disconnect_now(peer, 0);
+          continue;
+        }
+        connectionId = static_cast<plUInt32>(m_uiNextConnectionID++);
+        m_ConnectionIDs.Insert(peer, connectionId);
+      }
+      else if (!m_ConnectionIDs.TryGetValue(peer, connectionId))
+      {
+        if (enetEvent.type == ENET_EVENT_TYPE_RECEIVE)
+          enet_packet_destroy(enetEvent.packet);
+        continue;
+      }
+    }
     event.m_Sender.m_uiConnectionID = connectionId;
 
     switch (enetEvent.type)
@@ -167,6 +202,7 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
         if (IsServer())
         {
           m_PeerMap.Remove(connectionId);
+          m_ConnectionIDs.Remove(peer);
         }
         break;
       }
@@ -175,7 +211,10 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
         plLog::Debug("ENet: Timeout Id: {}.", connectionId);
         event.m_EventType = plNetworkEventTypeEnum::Timeout;
         if (IsServer())
+        {
           m_PeerMap.Remove(connectionId);
+          m_ConnectionIDs.Remove(peer);
+        }
         break;
       }
       case ENET_EVENT_TYPE_RECEIVE:
@@ -241,11 +280,14 @@ ENetPacketFlag ChannelTypeToPacketFlag(const plNetworkChannelTypeEnum::Enum chan
 
 void SendPacketToPeer(ENetPeer* peer, const plNetworkChannelTypeEnum::Enum channelType, const plNetworkMessage& message)
 {
+  if (!peer || peer->state != ENET_PEER_STATE_CONNECTED)
+    return;
   const ENetPacketFlag flag = ChannelTypeToPacketFlag(channelType);
 
   ENetPacket* packet = enet_packet_create_offset(message.m_pBuffer, message.m_uiLength, 0, flag);
 
-  enet_peer_send(peer, 0, packet);
+  if (packet != nullptr && enet_peer_send(peer, 0, packet) < 0)
+    enet_packet_destroy(packet);
 }
 
 void plDriverEnet::SendMessages(plEnum<plNetworkChannelTypeEnum> channelType, const plNetworkMessage& message)

@@ -9,5 +9,6 @@ public class PlasmaNetworkingWorkspace : WorkspaceRules
     {
         TargetNames.Add("NetworkPlugin");
         TargetNames.Add("EditorPluginNetworking");
+        TargetNames.Add("NetworkTest");
     }
 }

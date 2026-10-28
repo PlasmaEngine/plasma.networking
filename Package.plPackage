@@ -12,7 +12,7 @@ PackageInfo
 	// Version starts at 1.0.0 rather than inheriting an engine version: this package
 	// versions on its own changes from now on, not on the engine's.
 	string %Id{"plasma.networking"}
-	string %Version{"1.1.0"}
+	string %Version{"1.3.2"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
@@ -21,16 +21,18 @@ PackageInfo
 	// Must equal plSdkVersion::GetAbiTag() of the engine these binaries were built
 	// against. The build configuration is part of it - a Development and a Shipping
 	// build do not share a binary interface.
-	string %MinEngineVersion{"0.8.0"}
-	string %MaxEngineVersion{"0.8.0"}
-	string %AbiTag{"win64-msvc19-0.8.0-dev"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
+	string %AbiTag{"win64-msvc19-0.11.2-abi6-dev"}
 
 	// ---- presentation ---------------------------------------------------------
 	string %DisplayName{"Networking"}
 	string %Category{"Networking"}
 	string %Description{"Multiplayer networking - client/server sessions, replicated components and property replication.
 
-Physics-aware, so it expects the Jolt plugin to be enabled. Jolt ships with the engine and does not need installing."}
+Physics-aware, so it expects the Jolt plugin to be enabled. Jolt ships with the engine and does not need installing.
+
+The Platform driver and platform lobbies ride on the engine's platform services and need a platform backend package (Steam, EOS, ...) with transport and lobby support; without one the driver falls back to ENet."}
 	string %Icon{"Branding/NetworkingIcon.png"}
 	string %Banner{"Branding/NetworkingBanner.png"}
 
@@ -52,6 +54,8 @@ Physics-aware, so it expects the Jolt plugin to be enabled. Jolt ships with the 
 	Component { string %Name{"manifest"} string %Platform{"any"} }
 	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
 	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
+	// The editor plugin's icons, found under their ids (":/TypeIcons/plNetworkComponent.svg") in EditorIcons.
+	Component { string %Name{"tool"} string %Platform{"any"} string %Path{"EditorIcons"} }
 	Component { string %Name{"icon"} string %Platform{"any"} }
 	Component { string %Name{"banner"} string %Platform{"any"} }
 }

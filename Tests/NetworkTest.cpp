@@ -1,4 +1,4 @@
-#include <NetworkTest/NetworkTestPCH.h>
+#include "NetworkTestPCH.h"
 
 #include <TestFramework/Utilities/TestSetup.h>
 
