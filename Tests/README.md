@@ -24,7 +24,11 @@ Package tests can move the installed packages in the user store, so run them onl
     set PLASMA_SDK_ROOT=<engine checkout with Binaries/Windows_Development built>
     set PLASMA_PACKAGE_PATH=<directory holding plasma.networking and plasma.jolt>
     plasmabuild build NetworkTest
+    set PATH=%CD%\Bin\Windows_x64_Development;%PLASMA_SDK_ROOT%\Binaries\Windows_Development;%PATH%
     Bin\Tests\Windows_x64_Development\NetworkTest.exe -nogui -run
+
+The executable loads `plNetworkPlugin.dll` and the engine DLLs (`plTestFramework.dll` and others) from `PATH`; without
+the `PATH` line it exits immediately with a missing-DLL error.
 
 The test framework reports leaks per test under the Debug allocator. No CI lane builds or runs this suite yet; the
 engine's Linux CPU gate excludes package suites.
