@@ -1,13 +1,30 @@
 # NetworkTest
 
-The networking test suite, moved here from the engine's `Code/UnitTests/NetworkTest` when the plugin
-became a package. It tests this package's code, so it belongs with it.
+The networking test suite. `NetworkTest.target.cs` and `networktest.module.cs` build the `NetworkTest` executable against
+the package SDK, and `plasma.networking.workspace.cs` lists it next to the plugin targets.
 
-`NetworkTest.target.cs` and `networktest.module.cs` build the `NetworkTest` executable against the package SDK
-(`NetworkSecurityTest.cpp` holds the admission, authority, RPC, level, transport and variant-bound tests).
-No CI lane builds or runs it yet; the engine's Linux CPU gate excludes package suites.
+## Files
 
-`NetworkTest.target.cs.reference` and `networktest.module.cs.reference` are the original PlasmaBuild
-rule files, parked with a suffix so the package build does not try to compile them: they reference
-engine-only helpers such as `PlasmaBuildQt` and `TestFrameworkModule` that do not exist outside the
-engine tree. They are kept as the starting point for whenever packages can carry their own tests.
+- `NetworkTestHarness.h` holds what every test shares: `NetworkEndpoint` (one world, world module and replicated component,
+  any number per process), `PumpUntil`, `AdmissionObserver`, the `plNetworkTestAccess` seams, and `HostileClient`.
+- `HostileClient` is a raw ENet client with no application handshake. It sends exact bytes (`SendRaw`), a message with a
+  free message ID and payload (`SendWithID`), or a well-formed handshake (`Handshake`), and can pick its own connection ID.
+- `NetworkMessageTest.cpp` covers message bounds, quantization and prediction input bounds.
+- `NetworkSecurityTest.cpp` covers admission, authority, RPC, level commands, transport limits and variant bounds. Its first
+  block is the M0 gate: a host and two clients in one process replicate a property and tear down with no peers left.
+- `NetworkFuzzTest.cpp` sweeps every message ID with empty, random, all-0xFF and all-zero payloads from an unadmitted and
+  from an admitted client, then checks the host is up and a well-behaved client still replicates. It also feeds random
+  buffers to the RPC, spawn, despawn, ownership, variant and string parsers in the host and client roles. The seed is fixed.
+
+## Building and running
+
+Package tests can move the installed packages in the user store, so run them only on a machine where that is acceptable.
+
+    cd <package directory>
+    set PLASMA_SDK_ROOT=<engine checkout with Binaries/Windows_Development built>
+    set PLASMA_PACKAGE_PATH=<directory holding plasma.networking and plasma.jolt>
+    plasmabuild build NetworkTest
+    Bin\Tests\Windows_x64_Development\NetworkTest.exe -nogui -run
+
+The test framework reports leaks per test under the Debug allocator. No CI lane builds or runs this suite yet; the
+engine's Linux CPU gate excludes package suites.
