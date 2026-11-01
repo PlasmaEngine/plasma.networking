@@ -105,7 +105,7 @@ public static class PlasmaPackageSdk
             rules.PublicDefinitions.Add("BUILDSYSTEM_BUILDTYPE=\"Shipping\"");
         }
 
-        AddFeatureDefines(rules);
+        AddFeatureDefines(rules, context);
 
         AddImportLibrary(rules, context, "plFoundation");
         AddImportLibrary(rules, context, "plCore");
@@ -197,8 +197,17 @@ public static class PlasmaPackageSdk
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_JOLT_SUPPORT");
         rules.PublicDefinitions.Add("JPH_DEBUG_RENDERER");
 
-        rules.PublicLibraries.Add(Path.Combine(joltRoot, "Bin",
-            $"{context.Platform}_x64_{context.Configuration}", LibraryFileName(context, "plJoltPlugin")));
+        var joltLibrary = Path.Combine(joltRoot, "Bin", $"{context.Platform}_x64_{context.Configuration}",
+            LibraryFileName(context, "plJoltPlugin"));
+
+        if (context.Platform == TargetPlatform.Windows)
+        {
+            rules.PublicLibraries.Add(joltLibrary);
+        }
+        else
+        {
+            AddSharedObject(rules, joltLibrary);
+        }
     }
 
     /// \brief Locates a sibling package checkout.
@@ -235,7 +244,8 @@ public static class PlasmaPackageSdk
         rules.SourceDirectory = sourceDirectory;
         rules.PCHUsage = PCHUsage.UseExplicitOrShared;
         rules.SharedPCHHeaderFile = pchHeaderFile;
-        rules.AdditionalCompilerFlags.Add($"/FI\"{Path.Combine(context.ProjectRoot, sourceDirectory, pchHeaderFile)}\"");
+        var pchHeaderPath = Path.Combine(context.ProjectRoot, sourceDirectory, pchHeaderFile);
+        rules.AdditionalCompilerFlags.Add(context.Platform == TargetPlatform.Windows ? $"/FI\"{pchHeaderPath}\"" : $"-include \"{pchHeaderPath}\"");
 
         rules.PublicIncludePaths.Add("..");
         rules.PrivateDefinitions.Add(buildDefinition);
@@ -259,17 +269,22 @@ public static class PlasmaPackageSdk
     ///
     /// TODO: the engine build should emit this next to its binaries and this method should read it.
     /// A hand-maintained copy drifts silently, and the failure mode is a crash in unrelated code.
-    private static void AddFeatureDefines(ModuleRules rules)
+    private static void AddFeatureDefines(ModuleRules rules, BuildContext context)
     {
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_ZSTD_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_ZLIB_SUPPORT");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_TRACY_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_ENET_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_LUA_SUPPORT");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_DUKTAPE_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_OZZ_SUPPORT");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_NRD_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_IMGUI_SUPPORT");
+
+        // Tracy, Duktape and NRD are Windows-only third-party modules; the Linux engine is built without them.
+        if (context.Platform == TargetPlatform.Windows)
+        {
+            rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_TRACY_SUPPORT");
+            rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_DUKTAPE_SUPPORT");
+            rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_NRD_SUPPORT");
+        }
     }
 
     /// \brief Binds to another plugin shipped by this same package.
@@ -293,7 +308,7 @@ public static class PlasmaPackageSdk
         }
         else
         {
-            rules.PrivateLibraries.Add(Path.Combine(PackageBinaryDirectory(context), LibraryFileName(context, outputName)));
+            AddSharedObject(rules, Path.Combine(PackageBinaryDirectory(context), LibraryFileName(context, outputName)));
         }
     }
 
@@ -302,15 +317,34 @@ public static class PlasmaPackageSdk
         var library = Path.Combine(SdkBinaryDirectory(context),
             LibraryFileName(context, outputName));
 
-        if (File.Exists(library))
+        if (!File.Exists(library))
+        {
+            return;
+        }
+
+        if (context.Platform == TargetPlatform.Windows)
         {
             rules.PublicLibraries.Add(library);
         }
+        else
+        {
+            AddSharedObject(rules, library);
+        }
     }
 
+    /// \brief What a dependent links: the import library on Windows, the shared object itself elsewhere. PlasmaBuild
+    /// names a Unix shared object after its output name, with no "lib" prefix.
     private static string LibraryFileName(BuildContext context, string outputName)
     {
-        return context.Platform == TargetPlatform.Windows ? outputName + ".lib" : "lib" + outputName + ".so";
+        return outputName + (context.Platform == TargetPlatform.Windows ? ".lib" : ".so");
+    }
+
+    /// \brief Links a shared object by file name. The engine's .so files carry no SONAME, so linking one by full path
+    /// would record that build-machine path as the dependency; -l: records only the name the loader resolves.
+    private static void AddSharedObject(ModuleRules rules, string library)
+    {
+        rules.AdditionalLinkerFlags.Add($"-L\"{Path.GetDirectoryName(library)}\"");
+        rules.AdditionalLinkerFlags.Add($"-l:{Path.GetFileName(library)}");
     }
 
     private static void AddSdkThirdPartyIncludePaths(ModuleRules rules)

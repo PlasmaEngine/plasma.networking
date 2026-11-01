@@ -11,16 +11,19 @@ class plPlatformTransport;
 /// Rides the platform backend's relay/P2P transport (plPlatformTransport). Remote peers are
 /// plPlatformUserIds; each user gets one plNetworkConnection id for the lifetime of the driver
 /// (0 = the server on a client, 1.. = clients on a host). m_uiServerPort is ignored.
+///
+/// A transport has one event queue, so a driver claims it exclusively: a second Platform peer in the same process
+/// fails to initialize and runs on ENet instead.
 class PL_NETWORKPLUGIN_DLL plDriverPlatform : public plNetworkDriverInterface
 {
 
 public:
   plDriverPlatform();
-  virtual ~plDriverPlatform() = default;
+  virtual ~plDriverPlatform();
 
   plStringView GetDriverName() const override { return "Platform"; }
 
-  /// Fails when there is no platform services hub or the backend has no transport.
+  /// Fails when there is no platform services hub, the backend has no transport, or another driver holds it.
   PL_NODISCARD plResult Initalize(plNetworkPeer* pNetworkPeer, const plNetworkConfig& config) override;
   void Shutdown() override;
 
@@ -55,6 +58,11 @@ public:
 
 private:
   friend class plNetworkTestAccess;
+
+  /// Makes this driver the only user of the transport. Fails when another driver already holds it.
+  plResult ClaimTransport(plPlatformTransport* pTransport);
+  void ReleaseTransport();
+
   plUInt32 GetOrAllocateConnection(const plPlatformUserId& user);
   void RemoveConnection(plUInt32 uiConnectionID);
   const plPlatformUserId* FindUser(plUInt32 uiConnectionID) const;

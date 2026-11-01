@@ -10,6 +10,7 @@
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
 #include <NetworkPlugin/Core/NetworkLevelManager.h>
 #include <NetworkPlugin/Core/NetworkVariant.h>
+#include <TestFramework/Utilities/TestLogInterface.h>
 
 #include "NetworkTestHarness.h"
 
@@ -27,9 +28,9 @@ PL_END_COMPONENT_TYPE
 
 PL_CREATE_SIMPLE_TEST(Network, AdmissionAndLifetime)
 {
-  PL_TEST_BLOCK(plTestBlock::Enabled, "NW-F01: host and two clients replicate and tear down")
+  PL_TEST_BLOCK(plTestBlock::Enabled, "NW-F01 (M0 gate): host and two clients replicate and tear down")
   {
-    const plUInt32 uiPeersBefore = plNetworkPeer::m_Peers.GetCount();
+    const plUInt32 uiPeersBefore = plNetworkPeer::GetPeerCount();
     {
       NetworkEndpoint host, a, b;
       if (!PL_TEST_BOOL(host.Start(true))) return;
@@ -40,7 +41,7 @@ PL_CREATE_SIMPLE_TEST(Network, AdmissionAndLifetime)
       host.m_pComponent->MarkDirty();
       PL_TEST_BOOL(PumpUntil(host, &a, &b, [&] { return a.m_pComponent->m_uiValue == 73 && b.m_pComponent->m_uiValue == 73; }));
     }
-    PL_TEST_INT(plNetworkPeer::m_Peers.GetCount(), uiPeersBefore);
+    PL_TEST_INT(plNetworkPeer::GetPeerCount(), uiPeersBefore);
   }
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "NW-B01/02/08/11/12/16: hostile admission and teardown")
@@ -53,7 +54,7 @@ PL_CREATE_SIMPLE_TEST(Network, AdmissionAndLifetime)
     const plUInt16 port = plNetworkTestAccess::Host(host.m_pModule->GetPeer())->address.port;
     {
       HostileClient first(port, 0), second(port, 0);
-      for (plUInt32 i = 0; i < 100; ++i) { host.Pump(); first.Pump(); second.Pump(); plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1)); }
+      PumpAll(Pumped({&host}, {&first, &second}), [&] { return first.m_bConnected && second.m_bConnected && host.m_pModule->GetClients().GetCount() == 2; });
       if (!PL_TEST_BOOL(host.m_pModule->GetClients().GetCount() == 2)) return;
       auto* pFirst = host.m_pModule->GetClients()[0];
       auto* pSecond = host.m_pModule->GetClients()[1];
@@ -236,12 +237,13 @@ namespace
   public:
     plDynamicArray<plPlatformTransportEvent> m_Events;
     plUInt32 m_uiDisconnects = 0;
+    plUInt32 m_uiDisconnectAlls = 0;
 
     plResult Listen() override { return PL_SUCCESS; }
     void StopListening() override {}
     plResult Connect(const plPlatformUserId&) override { return PL_SUCCESS; }
     void Disconnect(const plPlatformUserId&) override { ++m_uiDisconnects; }
-    void DisconnectAll() override {}
+    void DisconnectAll() override { ++m_uiDisconnectAlls; }
     plResult Send(const plPlatformUserId&, plArrayPtr<const plUInt8>, bool, plUInt8) override { return PL_SUCCESS; }
     plUInt32 GetMaxPayloadBytes() const override { return 1200; }
     bool PollEvent(plPlatformTransportEvent& out_event) override
@@ -375,8 +377,13 @@ PL_CREATE_SIMPLE_TEST(Network, HostileTraffic)
     oversized.SetCount(config.m_uiMessageSize * 4u);
     plNetworkMessage message(oversized.GetData(), 0, oversized.GetCount(), oversized.GetCount(), 0);
     oversized[0] = static_cast<plUInt8>(plNetworkMessageIDs::UserMessageStart);
+    const plUInt32 uiReceivedBefore = pServerHost->totalReceivedData;
     hostile.Send(message);
-    PumpHostile(host, hostile);
+
+    // The host drops the oversized packet without acknowledging it, so wait for its bytes to arrive instead of an ack.
+    const Pumped pumped({&host, &client}, {&hostile});
+    PL_TEST_BOOL(PumpAll(pumped, [&] { return pServerHost->totalReceivedData - uiReceivedBefore >= oversized.GetCount(); }));
+    PumpOnce(pumped);
     PL_TEST_INT(observer.m_uiMessages, 0);
     PL_TEST_BOOL(host.m_pModule->GetPeer() != nullptr);
     host.m_pModule->RemoveNetworkObject(&observer);
@@ -391,7 +398,8 @@ PL_CREATE_SIMPLE_TEST(Network, HostileTraffic)
 
     FakeTransport transport;
     plDriverPlatform driver;
-    plNetworkTestAccess::Platform(driver, &transport, pPeer);
+    if (!PL_TEST_BOOL(plNetworkTestAccess::Platform(driver, &transport, pPeer).Succeeded()))
+      return;
     const plPlatformUserId userA = plPlatformUserId::Make("fake", "a");
     const plPlatformUserId userB = plPlatformUserId::Make("fake", "b");
     plNetworkEvent event;
@@ -413,5 +421,86 @@ PL_CREATE_SIMPLE_TEST(Network, HostileTraffic)
 
     PL_TEST_BOOL(driver.PopEvent(event).Failed()); // Duplicate and over-limit connects produce no event.
     PL_TEST_INT(transport.m_uiDisconnects, 2);     // The invalid user and the over-limit user were refused.
+  }
+}
+
+PL_CREATE_SIMPLE_TEST(Network, DriverIsolation)
+{
+  PL_TEST_BLOCK(plTestBlock::Enabled, "NW-B46: every peer owns its driver")
+  {
+    const plUInt32 uiPeersBefore = plNetworkPeer::GetPeerCount();
+    {
+      NetworkEndpoint host, a, b;
+      if (!PL_TEST_BOOL(host.Start(true)))
+        return;
+      const plUInt16 port = host.GetPort();
+      if (!PL_TEST_BOOL(a.Start(false, port) && b.Start(false, port)))
+        return;
+
+      const Pumped all({&host, &a, &b});
+      if (!PL_TEST_BOOL(PumpAll(all, [&] { return a.m_pModule->IsConnected() && b.m_pModule->IsConnected(); })))
+        return;
+
+      plNetworkPeer* pHostPeer = host.m_pModule->GetPeer();
+      plNetworkPeer* pPeerA = a.m_pModule->GetPeer();
+      plNetworkPeer* pPeerB = b.m_pModule->GetPeer();
+      PL_TEST_INT(plNetworkPeer::GetPeerCount(), uiPeersBefore + 3);
+      PL_TEST_BOOL(pHostPeer->GetDriver() != pPeerA->GetDriver() && pHostPeer->GetDriver() != pPeerB->GetDriver() && pPeerA->GetDriver() != pPeerB->GetDriver());
+      PL_TEST_BOOL(plNetworkTestAccess::Host(pHostPeer) != plNetworkTestAccess::Host(pPeerA) && plNetworkTestAccess::Host(pPeerA) != plNetworkTestAccess::Host(pPeerB));
+
+      // Shutting one client's driver down leaves the other client's connection and replication intact.
+      a.Stop();
+      PL_TEST_BOOL(PumpAll(all, [&] { return a.m_pModule->GetPeer() == nullptr && host.m_pModule->GetClients().GetCount() == 1; }));
+      PL_TEST_BOOL(b.m_pModule->IsConnected());
+      PL_TEST_INT(plNetworkPeer::GetPeerCount(), uiPeersBefore + 2);
+      host.m_pComponent->m_uiValue = 11;
+      host.m_pComponent->MarkDirty();
+      PL_TEST_BOOL(PumpAll(all, [&] { return b.m_pComponent->m_uiValue == 11; }));
+
+      // The stopped client starts again on a new driver and replicates next to the one that stayed.
+      if (!PL_TEST_BOOL(a.Start(false, port)))
+        return;
+      PL_TEST_BOOL(PumpAll(all, [&] { return a.m_pModule->IsConnected() && host.m_pModule->GetClients().GetCount() == 2; }));
+      host.m_pComponent->m_uiValue = 12;
+      host.m_pComponent->MarkDirty();
+      PL_TEST_BOOL(PumpAll(all, [&] { return a.m_pComponent->m_uiValue == 12 && b.m_pComponent->m_uiValue == 12; }));
+    }
+    PL_TEST_INT(plNetworkPeer::GetPeerCount(), uiPeersBefore);
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "NW-B46: one platform transport, one peer")
+  {
+    FakeTransport transport;
+    const plPlatformUserId user = plPlatformUserId::Make("fake", "a");
+    plNetworkEvent event;
+    {
+      plDriverPlatform first, second;
+      if (!PL_TEST_BOOL(plNetworkTestAccess::Platform(first, &transport, nullptr).Succeeded()))
+        return;
+
+      {
+        plTestLogInterface log;
+        plTestLogSystemScope logScope(&log);
+        log.ExpectMessage("in use by another network peer", plLogMsgType::ErrorMsg);
+        PL_TEST_BOOL(plNetworkTestAccess::Platform(second, &transport, nullptr).Failed());
+      }
+
+      // The refused driver can neither read the first driver's events nor tear its connections down.
+      transport.Push(plPlatformTransportEvent::Type::Connected, user);
+      PL_TEST_BOOL(second.PopEvent(event).Failed());
+      second.Shutdown();
+      PL_TEST_INT(transport.m_uiDisconnectAlls, 0);
+      if (PL_TEST_BOOL(first.PopEvent(event).Succeeded()))
+        PL_TEST_BOOL(event.m_EventType == plNetworkEventTypeEnum::Connected);
+
+      // Shutdown releases the transport, so another driver can claim it.
+      first.Shutdown();
+      PL_TEST_INT(transport.m_uiDisconnectAlls, 1);
+      PL_TEST_BOOL(plNetworkTestAccess::Platform(second, &transport, nullptr).Succeeded());
+    }
+
+    // So does destroying the driver that holds it.
+    plDriverPlatform third;
+    PL_TEST_BOOL(plNetworkTestAccess::Platform(third, &transport, nullptr).Succeeded());
   }
 }

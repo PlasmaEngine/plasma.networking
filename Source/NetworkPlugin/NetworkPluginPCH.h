@@ -9,6 +9,6 @@
 #include <NetworkPlugin/Core/NetworkTypes.h>
 
 // Include Windows.h the proper way before enet can include it improperly
-#ifdef PL_PLATFORM_WINDOWS
+#if PL_ENABLED(PL_PLATFORM_WINDOWS)
 #  include <Foundation/Basics/Platform/Win/IncludeWindows.h>
 #endif

@@ -26,7 +26,8 @@ public:
 class PL_NETWORKPLUGIN_DLL plNetworkPeer
 {
 public:
-  static plDynamicArray<plNetworkPeer*> m_Peers;
+  /// \brief Number of peers created by CreatePeer and not yet destroyed. Safe to call from any thread.
+  static plUInt32 GetPeerCount();
 
   PL_NODISCARD plResult Initialize(const plNetworkConfig& config);
   void Shutdown();
@@ -74,6 +75,9 @@ public:
   plNetworkDriverInterface* GetDriver() const { return m_pDriver; }
 
 private:
+  /// @brief Every live peer. Worlds can update on different threads, so it is only touched under s_PeersMutex.
+  static plDynamicArray<plNetworkPeer*> s_Peers;
+
   /// @brief The network driver instance owned by this peer
   plNetworkDriverInterface* m_pDriver = nullptr;
 
