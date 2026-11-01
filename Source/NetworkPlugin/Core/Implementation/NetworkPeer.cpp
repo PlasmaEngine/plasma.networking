@@ -7,18 +7,21 @@
 #include <Foundation/Profiling/Profiling.h>
 #include <Foundation/System/SystemInformation.h>
 #include <Foundation/Memory/PageAllocator.h>
+#include <Foundation/Threading/AtomicInteger.h>
+#include <Foundation/Threading/Mutex.h>
 
 #if BUILDSYSTEM_ENABLE_ENET_SUPPORT
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 #endif
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
 
-plDynamicArray<plNetworkPeer*> plNetworkPeer::m_Peers;
-
-plUInt32 lastHostID = 0;
+plDynamicArray<plNetworkPeer*> plNetworkPeer::s_Peers;
 
 namespace
 {
+  plMutex s_PeersMutex;
+  plAtomicInteger32 s_iLastHostID;
+
   plNetworkDriverInterface* CreateDriver(plDriverTypeEnum::Enum driverType)
   {
     switch (driverType)
@@ -200,7 +203,7 @@ plNetworkPeer* plNetworkPeer::CreatePeer(const plNetworkConfig& config)
   }
 
   plNetworkPeer* pPeer = PL_DEFAULT_NEW(plNetworkPeer);
-  pPeer->m_iHostID = ++lastHostID;
+  pPeer->m_iHostID = static_cast<plInt8>(s_iLastHostID.Increment());
 
   if(pPeer->Initialize(config).Failed())
   {
@@ -208,8 +211,15 @@ plNetworkPeer* plNetworkPeer::CreatePeer(const plNetworkConfig& config)
     return nullptr;
   }
 
-  m_Peers.PushBack(pPeer);
+  PL_LOCK(s_PeersMutex);
+  s_Peers.PushBack(pPeer);
   return pPeer;
+}
+
+plUInt32 plNetworkPeer::GetPeerCount()
+{
+  PL_LOCK(s_PeersMutex);
+  return s_Peers.GetCount();
 }
 
 void plNetworkPeer::DestroyPeer(plNetworkPeer* pPeer)
@@ -219,7 +229,10 @@ void plNetworkPeer::DestroyPeer(plNetworkPeer* pPeer)
 
   pPeer->Shutdown();
   pPeer->m_iHostID = -1;
-  m_Peers.RemoveAndSwap(pPeer);
+  {
+    PL_LOCK(s_PeersMutex);
+    s_Peers.RemoveAndSwap(pPeer);
+  }
   PL_DEFAULT_DELETE(pPeer);
 }
 

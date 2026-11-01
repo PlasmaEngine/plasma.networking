@@ -1,5 +1,6 @@
 #include <NetworkPlugin/NetworkPluginPCH.h>
 
+#include <Foundation/Threading/Mutex.h>
 #include <GameEngine/PlatformServices/Interfaces/PlatformProviders.h>
 #include <GameEngine/PlatformServices/PlatformServices.h>
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
@@ -13,17 +14,27 @@ namespace
   {
     return channel == plNetworkChannelTypeEnum::Reliable || channel == plNetworkChannelTypeEnum::ReliableOrdered;
   }
+
+  // Transports held by a driver. A shared transport would hand one peer's events to whichever peer polls first.
+  plMutex s_TransportClaimsMutex;
+  plHybridArray<plPlatformTransport*, 2> s_ClaimedTransports;
 } // namespace
 
 plDriverPlatform::plDriverPlatform()
 {
 }
 
+plDriverPlatform::~plDriverPlatform()
+{
+  ReleaseTransport();
+}
+
 plResult plDriverPlatform::Initalize(plNetworkPeer* pNetworkPeer, const plNetworkConfig& config)
 {
+  ReleaseTransport();
+
   m_pNetworkPeer = pNetworkPeer;
   m_Config = config;
-  m_pTransport = nullptr;
   m_bListening = false;
   m_ServerUser = plPlatformUserId();
   m_uiNextConnectionID = 1;
@@ -37,12 +48,15 @@ plResult plDriverPlatform::Initalize(plNetworkPeer* pNetworkPeer, const plNetwor
     return PL_FAILURE;
   }
 
-  m_pTransport = pHub->GetTransport();
-  if (m_pTransport == nullptr)
+  plPlatformTransport* pTransport = pHub->GetTransport();
+  if (pTransport == nullptr)
   {
     plLog::Error("Platform: backend '{}' provides no transport.", pHub->GetBackendId());
     return PL_FAILURE;
   }
+
+  if (ClaimTransport(pTransport).Failed())
+    return PL_FAILURE;
 
   plLog::Info("Platform: transport of backend '{}' ready (max payload {} bytes).", pHub->GetBackendId(), m_pTransport->GetMaxPayloadBytes());
 
@@ -61,7 +75,7 @@ void plDriverPlatform::Shutdown()
     }
   }
 
-  m_pTransport = nullptr;
+  ReleaseTransport();
   m_bListening = false;
   m_ServerUser = plPlatformUserId();
   m_UserToConnection.Clear();
@@ -396,6 +410,33 @@ plString plDriverPlatform::GetLocalUserAddress()
 
   plStringBuilder sAddress("user:", localUser.m_sCanonical);
   return sAddress;
+}
+
+plResult plDriverPlatform::ClaimTransport(plPlatformTransport* pTransport)
+{
+  ReleaseTransport();
+
+  PL_LOCK(s_TransportClaimsMutex);
+
+  if (s_ClaimedTransports.Contains(pTransport))
+  {
+    plLog::Error("Platform: the transport is in use by another network peer in this process.");
+    return PL_FAILURE;
+  }
+
+  s_ClaimedTransports.PushBack(pTransport);
+  m_pTransport = pTransport;
+  return PL_SUCCESS;
+}
+
+void plDriverPlatform::ReleaseTransport()
+{
+  if (m_pTransport == nullptr)
+    return;
+
+  PL_LOCK(s_TransportClaimsMutex);
+  s_ClaimedTransports.RemoveAndSwap(m_pTransport);
+  m_pTransport = nullptr;
 }
 
 plUInt32 plDriverPlatform::GetOrAllocateConnection(const plPlatformUserId& user)

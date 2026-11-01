@@ -8,11 +8,6 @@
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 
 
-namespace
-{
-  plUInt32 s_uiEnetUsers = 0;
-}
-
 plDriverEnet::plDriverEnet()
 {
 
@@ -24,14 +19,18 @@ plResult plDriverEnet::Initalize(plNetworkPeer* pNetworkPeer, const plNetworkCon
   m_Config = config;
   m_PeerMap.Clear();
 
-  if(s_uiEnetUsers == 0 && enet_initialize() != 0)
+  // Every driver owns one initialize/deinitialize pair. What they wrap (WSAStartup and timeBeginPeriod on Windows,
+  // nothing elsewhere) is reference counted by the OS, so no process-wide count is shared between peers.
+  if (!m_bInitialized)
   {
-    plLog::Error("ENet: Failed to initialize ENet.");
-    return PL_FAILURE;
-  }
+    if (enet_initialize() != 0)
+    {
+      plLog::Error("ENet: Failed to initialize ENet.");
+      return PL_FAILURE;
+    }
 
-  ++s_uiEnetUsers;
-  m_bInitialized = true;
+    m_bInitialized = true;
+  }
 
   plLog::Info("ENet: ENet initialized.");
   return PL_SUCCESS;
@@ -46,7 +45,7 @@ void plDriverEnet::Shutdown()
 
   enet_host_destroy(m_pEnetHost);
 
-  if (m_bInitialized && --s_uiEnetUsers == 0)
+  if (m_bInitialized)
     enet_deinitialize();
   m_bInitialized = false;
 
