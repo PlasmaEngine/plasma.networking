@@ -105,15 +105,15 @@ void plNetworkedTransformComponent::Update()
     m_bBandwidthPrioritySet = true;
   }
 
-  // Determine authority
+  // The owning client simulates an owned object; the host or server simulates everything nobody owns (scene objects).
   bool bIsLocal = false;
-  if (GetNetID() != 0)
+  if (const plNetworkObjectInfo* pInfo = GetNetID() != 0 ? m_pNetworkModule->FindOwningObject(this) : nullptr)
   {
-    bIsLocal = IsLocallyOwned();
+    bIsLocal = pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
   }
-  else if (m_pNetworkModule->IsHost())
+  else
   {
-    bIsLocal = true;
+    bIsLocal = m_pNetworkModule->IsHost() || m_pNetworkModule->IsServer();
   }
 
   // One-time authority notification
@@ -160,7 +160,7 @@ void plNetworkedTransformComponent::UpdateAsAuthority()
     return;
   m_LastSendTime = now;
 
-  if (m_pNetworkModule->IsHost())
+  if (m_pNetworkModule->IsHost() || m_pNetworkModule->IsServer())
   {
     BroadcastStateToClients(true);
   }
