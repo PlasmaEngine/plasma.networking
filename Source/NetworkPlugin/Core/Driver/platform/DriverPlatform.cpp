@@ -36,6 +36,7 @@ plResult plDriverPlatform::Initalize(plNetworkPeer* pNetworkPeer, const plNetwor
   m_pNetworkPeer = pNetworkPeer;
   m_Config = config;
   m_bListening = false;
+  m_bTransportInUse = false;
   m_ServerUser = plPlatformUserId();
   m_uiNextConnectionID = 1;
   m_UserToConnection.Clear();
@@ -421,11 +422,13 @@ plResult plDriverPlatform::ClaimTransport(plPlatformTransport* pTransport)
   if (s_ClaimedTransports.Contains(pTransport))
   {
     plLog::Error("Platform: the transport is in use by another network peer in this process.");
+    m_bTransportInUse = true;
     return PL_FAILURE;
   }
 
   s_ClaimedTransports.PushBack(pTransport);
   m_pTransport = pTransport;
+  m_bTransportInUse = false;
   return PL_SUCCESS;
 }
 

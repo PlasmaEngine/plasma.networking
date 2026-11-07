@@ -30,6 +30,14 @@ the package SDK, and `plasma.networking.workspace.cs` lists it next to the plugi
   To re-measure, run `-filter BandwidthBudget` a few times on Windows and Linux and read those lines; each ceiling is the
   larger platform maximum plus 25 %. The block that checks `plNetworkBandwidthConfig::m_uiMaxBytesPerTick` is disabled,
   because the send loop does not enforce that budget yet.
+- `NetworkIsolationTest.cpp` covers the rest of NW-B46. `TwoSessions` runs two hosts with two clients each and checks that
+  stopping one host ends only its own session. `SamePortRefused` checks that a second host can bind neither the wildcard
+  nor the loopback address on a port a host already holds, in either order. On Windows this relies on the engine's ENet
+  setting `SO_EXCLUSIVEADDRUSE`. `StartStopChurn` restarts one client 260 times next to a steady one, and `ParallelPump`
+  updates a host and three clients on four threads, one world per thread.
+- Shared on purpose between all peers in a process: the ENet clock, the serializer's per-type property cache and the
+  `net_sim_*` / `Networking.*` CVars. Everything else belongs to one world module, its peer and its driver; the rules
+  are on `plNetworkDriverInterface`.
 - `NetworkFuzzTest.cpp` sweeps every message ID with empty, random, all-0xFF and all-zero payloads from an unadmitted and
   from an admitted client, then checks the host is up and a well-behaved client still replicates. It also feeds random
   buffers to the RPC, spawn, despawn, ownership, variant and string parsers in the host and client roles. The seed is fixed.

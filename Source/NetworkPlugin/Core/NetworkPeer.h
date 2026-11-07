@@ -60,8 +60,6 @@ public:
     return m_MessageBuffer + m_Config.m_uiMessageSize * messageID;
   }
 
-  plInt8 m_iHostID = -1;
-
   plNetworkConfig m_Config;
 
   plEnum<plNetworkRoleEnum> m_Role;

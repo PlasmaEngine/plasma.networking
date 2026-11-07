@@ -485,6 +485,10 @@ PL_CREATE_SIMPLE_TEST(Network, DriverIsolation)
         PL_TEST_BOOL(plNetworkTestAccess::Platform(second, &transport, nullptr).Failed());
       }
 
+      // The refusal is reported as "in use", which stops the peer from falling back to an ENet socket.
+      PL_TEST_BOOL(second.IsTransportInUse());
+      PL_TEST_BOOL(!first.IsTransportInUse());
+
       // The refused driver can neither read the first driver's events nor tear its connections down.
       transport.Push(plPlatformTransportEvent::Type::Connected, user);
       PL_TEST_BOOL(second.PopEvent(event).Failed());
@@ -497,6 +501,7 @@ PL_CREATE_SIMPLE_TEST(Network, DriverIsolation)
       first.Shutdown();
       PL_TEST_INT(transport.m_uiDisconnectAlls, 1);
       PL_TEST_BOOL(plNetworkTestAccess::Platform(second, &transport, nullptr).Succeeded());
+      PL_TEST_BOOL(!second.IsTransportInUse());
     }
 
     // So does destroying the driver that holds it.
