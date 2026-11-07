@@ -42,6 +42,18 @@ void plDriverEnet::Shutdown()
   {
     enet_peer_disconnect_now(m_pEnetPeer, 0);
   }
+  else if (m_pEnetHost)
+  {
+    // A listening host tells every client it is gone; destroying it alone leaves them waiting for a timeout.
+    // Flush first: disconnect_now discards whatever is still queued, including the world module's Disconnect message.
+    enet_host_flush(m_pEnetHost);
+    for (size_t i = 0; i < m_pEnetHost->peerCount; ++i)
+    {
+      ENetPeer* pPeer = &m_pEnetHost->peers[i];
+      if (pPeer->state == ENET_PEER_STATE_CONNECTED || pPeer->state == ENET_PEER_STATE_DISCONNECT_LATER)
+        enet_peer_disconnect_now(pPeer, 0);
+    }
+  }
 
   enet_host_destroy(m_pEnetHost);
 
