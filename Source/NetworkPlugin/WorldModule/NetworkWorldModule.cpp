@@ -311,12 +311,17 @@ bool plNetworkWorldModule::StartHost()
   plLog::Dev("Starting Network Host");
   if (!StartPeer())
   {
+    m_Role = plNetworkRoleEnum::Undefined;
     m_Status = plNetworkConnectionState::Offline;
     return false;
   }
 
   if (m_pPeer->Listen().Failed())
   {
+    // Nobody is connected yet, so there is nothing to announce: release the driver and its socket right away instead of
+    // keeping a dead host peer until the next Stop().
+    StopPeer();
+    m_Role = plNetworkRoleEnum::Undefined;
     m_Status = plNetworkConnectionState::Offline;
     return false;
   }

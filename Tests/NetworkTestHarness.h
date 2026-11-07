@@ -6,9 +6,13 @@
 #include <Foundation/Threading/ThreadUtils.h>
 #include <GameEngine/PlatformServices/Interfaces/PlatformProviders.h>
 #include <NetworkPlugin/Components/NetworkComponent.h>
+#include <NetworkPlugin/Components/NetworkedPropertiesComponent.h>
+#include <NetworkPlugin/Components/NetworkedTransformComponent.h>
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
 #include <NetworkPlugin/Core/NetworkLevelManager.h>
+
+#include <initializer_list>
 
 class plNetworkSecurityComponent;
 using plNetworkSecurityComponentManager = plComponentManager<plNetworkSecurityComponent, plBlockStorageType::Compact>;
@@ -35,11 +39,29 @@ public:
   }
 };
 
+class plNetworkReplicaTargetComponent;
+using plNetworkReplicaTargetComponentManager = plComponentManager<plNetworkReplicaTargetComponent, plBlockStorageType::Compact>;
+
+/// \brief A plain gameplay component whose reflected members a plNetworkedPropertiesComponent replicates.
+class plNetworkReplicaTargetComponent : public plComponent
+{
+  PL_DECLARE_COMPONENT_TYPE(plNetworkReplicaTargetComponent, plComponent, plNetworkReplicaTargetComponentManager);
+
+public:
+  plInt32 m_iValue = 0;
+  plVec3 m_vPosition = plVec3::MakeZero();
+};
+
 /// \brief Narrow test seams for constructing ownership and transport faults without loading gameplay assets.
 class plNetworkTestAccess
 {
 public:
   static ENetHost* Host(plNetworkPeer* pPeer) { return static_cast<plDriverEnet*>(pPeer->GetDriver())->m_pEnetHost; }
+
+  /// \brief UDP payload bytes this peer's ENet host has sent or received, all connections and protocol overhead included.
+  static plUInt64 BytesSent(plNetworkPeer* pPeer) { return pPeer ? Host(pPeer)->totalSentData : 0; }
+  static plUInt64 BytesReceived(plNetworkPeer* pPeer) { return pPeer ? Host(pPeer)->totalReceivedData : 0; }
+
   static void Role(plNetworkWorldModule* pModule, plNetworkRoleEnum::Enum role) { pModule->m_Role = role; }
   static void Own(plNetworkWorldModule* pModule, plGameObject* pObject, plUInt32 uiObjectID, plUInt32 uiClientID)
   {
@@ -51,12 +73,15 @@ public:
     pModule->m_ObjectManager.m_ObjectToNetworkID.Insert(pObject->GetHandle(), uiObjectID);
   }
   static void Expire(plNetworkClient* pClient) { pClient->m_AdmissionStartTime = plTime::Now() - plTime::MakeFromSeconds(20); }
-  static void Platform(plDriverPlatform& driver, plPlatformTransport* pTransport, plNetworkPeer* pPeer)
+  static plResult Platform(plDriverPlatform& driver, plPlatformTransport* pTransport, plNetworkPeer* pPeer)
   {
-    driver.m_pTransport = pTransport;
+    if (driver.ClaimTransport(pTransport).Failed())
+      return PL_FAILURE;
+
     driver.m_pNetworkPeer = pPeer;
     driver.m_bListening = true;
     driver.m_Config.m_uiConnectionLimit = 1;
+    return PL_SUCCESS;
   }
 };
 
@@ -85,6 +110,81 @@ namespace NetworkTestHarness
       m_World.Update();
     }
 
+    /// \brief A scene object whose target component's Value and Position are replicated by a plNetworkedPropertiesComponent.
+    struct Replica
+    {
+      plGameObject* m_pObject = nullptr;
+      plNetworkReplicaTargetComponent* m_pTarget = nullptr;
+      plNetworkedPropertiesComponent* m_pProperties = nullptr;
+    };
+
+    plHybridArray<Replica, 16> m_Replicas;
+
+    /// \brief Adds a replica named sName. Every endpoint must add the same names in the same order, because scene NetIDs
+    /// are hashed from the object path. Interpolation is off, so a received value is applied as it arrives.
+    Replica& AddReplica(plStringView sName, plReplicateAuthority::Enum authority)
+    {
+      PL_LOCK(m_World.GetWriteMarker());
+      plGameObjectDesc desc;
+      desc.m_sName.Assign(sName);
+      desc.m_bDynamic = true;
+
+      Replica& replica = m_Replicas.ExpandAndGetRef();
+      m_World.CreateObject(desc, replica.m_pObject);
+      m_World.GetOrCreateComponentManager<plNetworkReplicaTargetComponentManager>()->CreateComponent(replica.m_pObject, replica.m_pTarget);
+      m_World.GetOrCreateComponentManager<plNetworkedPropertiesComponentManager>()->CreateComponent(replica.m_pObject, replica.m_pProperties);
+
+      plNetworkedPropertiesComponent* pProperties = replica.m_pProperties;
+      pProperties->m_Authority = authority;
+      pProperties->m_fInterpolationTime = 0.0f;
+      pProperties->m_fSendRate = 60.0f;
+      for (const char* szProperty : {"Value", "Position"})
+      {
+        plNetworkedPropertyEntry& entry = pProperties->m_Properties.ExpandAndGetRef();
+        entry.m_sComponentType = plGetStaticRTTI<plNetworkReplicaTargetComponent>()->GetTypeName();
+        entry.m_sProperty = szProperty;
+      }
+
+      m_World.Update();
+      return replica;
+    }
+
+    /// \brief Adds a scene object with a plNetworkedTransformComponent. Bounds are tight so 16-bit positions resolve to ~2 mm.
+    plGameObject* AddMover(plStringView sName, plNetworkedTransformComponent** out_pComponent = nullptr)
+    {
+      PL_LOCK(m_World.GetWriteMarker());
+      plGameObjectDesc desc;
+      desc.m_sName.Assign(sName);
+      desc.m_bDynamic = true;
+      desc.m_LocalPosition.Set(1.0f, 2.0f, 3.0f);
+      plGameObject* pObject = nullptr;
+      m_World.CreateObject(desc, pObject);
+
+      plNetworkedTransformComponent* pComponent = nullptr;
+      m_World.GetOrCreateComponentManager<plNetworkedTransformComponentManager>()->CreateComponent(pObject, pComponent);
+      pComponent->m_vWorldBoundsMin = plVec3(-64.0f);
+      pComponent->m_vWorldBoundsMax = plVec3(64.0f);
+      if (out_pComponent)
+        *out_pComponent = pComponent;
+
+      m_World.Update();
+      return pObject;
+    }
+
+    /// \brief The host's record of the client that this endpoint is, or null.
+    plNetworkClient* FindClient(const NetworkEndpoint& client)
+    {
+      for (plNetworkClient* pClient : m_pModule->GetClients())
+      {
+        if (pClient && pClient->m_uiClientID == client.m_pModule->GetLocalClientID())
+          return pClient;
+      }
+      return nullptr;
+    }
+
+    plUInt64 BytesSent() const { return plNetworkTestAccess::BytesSent(m_pModule->GetPeer()); }
+    plUInt64 BytesReceived() const { return plNetworkTestAccess::BytesReceived(m_pModule->GetPeer()); }
+
     void Pump()
     {
       PL_LOCK(m_World.GetWriteMarker());
@@ -102,26 +202,97 @@ namespace NetworkTestHarness
       return bHost ? m_pModule->StartHost() : m_pModule->StartClient();
     }
 
+    void Stop()
+    {
+      PL_LOCK(m_World.GetWriteMarker());
+      m_pModule->Stop();
+    }
+
     plUInt16 GetPort() { return plNetworkTestAccess::Host(m_pModule->GetPeer())->address.port; }
   };
+
+  struct HostileClient;
+
+  /// \brief Everything one wait services.
+  ///
+  /// A host drops a client that is not serviced for its inactivity timeout, so a wait lists every endpoint and hostile
+  /// client that is alive in the test, not only the ones it is waiting for. Null entries are skipped.
+  struct Pumped
+  {
+    Pumped(std::initializer_list<NetworkEndpoint*> endpoints, std::initializer_list<HostileClient*> hostile = {})
+    {
+      for (NetworkEndpoint* pEndpoint : endpoints)
+      {
+        if (pEndpoint)
+          m_Endpoints.PushBack(pEndpoint);
+      }
+
+      for (HostileClient* pClient : hostile)
+      {
+        if (pClient)
+          m_Hostile.PushBack(pClient);
+      }
+    }
+
+    plHybridArray<NetworkEndpoint*, 4> m_Endpoints;
+    plHybridArray<HostileClient*, 4> m_Hostile;
+  };
+
+  inline void PumpOnce(const Pumped& pumped);
+
+  /// \brief Services everything in the set until the predicate holds or the timeout passes.
+  ///
+  /// The loop yields instead of sleeping. A fixed sleep is a timer-granularity wait whose length depends on the machine,
+  /// so a wait counted in sleeps is a wall-clock budget that changes from run to run.
+  template <typename Predicate>
+  bool PumpAll(const Pumped& pumped, Predicate predicate, plTime timeout = plTime::MakeFromSeconds(5))
+  {
+    const plTime deadline = plTime::Now() + timeout;
+    do
+    {
+      PumpOnce(pumped);
+      if (predicate())
+        return true;
+      plThreadUtils::YieldTimeSlice();
+    } while (plTime::Now() < deadline);
+    return false;
+  }
+
+  /// \brief Services everything in the set for a fixed wall-clock duration. Only for traffic that is itself time-driven
+  /// (pings, time sync, send-rate throttles); waits for an outcome go through PumpAll.
+  inline void PumpFor(const Pumped& pumped, plTime duration)
+  {
+    PumpAll(pumped, [] { return false; }, duration);
+  }
+
+  /// \brief Starts the host and every client, then waits until each client is admitted and the host lists all of them.
+  inline bool ConnectAll(const Pumped& pumped, NetworkEndpoint& host, std::initializer_list<NetworkEndpoint*> clients)
+  {
+    if (!host.Start(true))
+      return false;
+
+    for (NetworkEndpoint* pClient : clients)
+    {
+      if (!pClient->Start(false, host.GetPort()))
+        return false;
+    }
+
+    return PumpAll(pumped, [&]
+      {
+        for (NetworkEndpoint* pClient : clients)
+        {
+          if (!pClient->m_pModule->IsConnected() || host.FindClient(*pClient) == nullptr)
+            return false;
+        }
+        return true;
+      });
+  }
 
   /// \brief Pumps the host and up to two clients until the predicate holds or five seconds pass.
   template <typename Predicate>
   bool PumpUntil(NetworkEndpoint& host, NetworkEndpoint* pA, NetworkEndpoint* pB, Predicate predicate)
   {
-    const plTime deadline = plTime::Now() + plTime::MakeFromSeconds(5);
-    do
-    {
-      host.Pump();
-      if (pA)
-        pA->Pump();
-      if (pB)
-        pB->Pump();
-      if (predicate())
-        return true;
-      plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1));
-    } while (plTime::Now() < deadline);
-    return false;
+    return PumpAll(Pumped({&host, pA, pB}), predicate);
   }
 
   struct AdmissionObserver : plNetworkObject
@@ -175,6 +346,13 @@ namespace NetworkTestHarness
       }
     }
 
+    /// \brief True once the host has acknowledged everything this client sent reliably, including the connect, or once
+    /// the connection is gone.
+    bool IsSettled() const
+    {
+      return m_bDisconnected || (enet_list_empty(&m_pPeer->outgoingReliableCommands) && enet_list_empty(&m_pPeer->sentReliableCommands));
+    }
+
     /// \brief Tells the host this client is gone, so its connection slot is freed before the next hostile client connects.
     void Disconnect()
     {
@@ -221,14 +399,57 @@ namespace NetworkTestHarness
     }
   };
 
-  inline bool PumpHostile(NetworkEndpoint& host, HostileClient& client, plUInt32 uiCount = 50)
+  inline void PumpOnce(const Pumped& pumped)
   {
-    for (plUInt32 i = 0; i < uiCount; ++i)
-    {
-      host.Pump();
-      client.Pump();
-      plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1));
-    }
+    for (NetworkEndpoint* pEndpoint : pumped.m_Endpoints)
+      pEndpoint->Pump();
+
+    for (HostileClient* pClient : pumped.m_Hostile)
+      pClient->Pump();
+  }
+
+  /// \brief Pumps until the host has acknowledged everything the hostile clients sent, then once more.
+  ///
+  /// ENet acknowledges a reliable packet in the same service call that receives it, and the world module handles every
+  /// received event in that update, so the extra round only covers work the host defers to its next update.
+  inline bool Settle(const Pumped& pumped)
+  {
+    const bool bSettled = PumpAll(pumped, [&]
+      {
+        for (const HostileClient* pClient : pumped.m_Hostile)
+        {
+          if (!pClient->IsSettled())
+            return false;
+        }
+        return true;
+      });
+
+    if (!bSettled)
+      plLog::Warning("NetworkTest: hostile traffic was still unacknowledged when the wait ran out.");
+
+    PumpOnce(pumped);
+    return bSettled;
+  }
+
+  /// \brief Settles one hostile client against the host and reports whether it is connected.
+  inline bool PumpHostile(NetworkEndpoint& host, HostileClient& client)
+  {
+    Settle(Pumped({&host}, {&client}));
     return client.m_bConnected;
+  }
+
+  /// \brief Disconnects the hostile client and waits until the host has released its connection slot.
+  ///
+  /// This counts ENet peers rather than world module clients, so it also finishes when the host had already dropped the
+  /// client and only the transport connection was left.
+  inline void DisconnectHostile(const Pumped& pumped, NetworkEndpoint& host, HostileClient& client)
+  {
+    if (!client.m_bConnected || client.m_bDisconnected || host.m_pModule->GetPeer() == nullptr)
+      return;
+
+    const ENetHost* pHost = plNetworkTestAccess::Host(host.m_pModule->GetPeer());
+    const size_t uiPeersBefore = pHost->connectedPeers;
+    client.Disconnect();
+    PumpAll(pumped, [&] { return pHost->connectedPeers < uiPeersBefore; });
   }
 } // namespace NetworkTestHarness

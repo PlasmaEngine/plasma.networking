@@ -15,7 +15,8 @@ plCVarFloat cvar_NetSimReorder("net_sim_reorder", 0.0f, plCVarFlags::Default, "P
 plCVarInt cvar_NetSimBandwidth("net_sim_bandwidth", 0, plCVarFlags::Default, "Bandwidth limit in bytes/sec (0 = unlimited)");
 plCVarString cvar_NetSimPreset("net_sim_preset", "", plCVarFlags::Default, "Apply preset: lan, broadband, mobile3g, mobile4g, satellite, bad, none");
 
-// Global simulator instance
+// One simulator for the whole process. No driver sends through it yet; whoever wires it in must give each
+// plNetworkPeer its own instance, since its packet queues hold per-connection state.
 static plNetworkSimulator s_NetworkSimulator;
 
 //////////////////////////////////////////////////////////////////////////

@@ -29,14 +29,10 @@ namespace
     }
   }
 
-  void DisconnectHostile(NetworkEndpoint& host, HostileClient& hostile)
-  {
-    hostile.Disconnect();
-    PumpHostile(host, hostile, 5);
-  }
-
   /// \brief Sends every message ID with every payload shape. A client that is kicked on the way is replaced by a new one.
-  void SweepMessageIDs(NetworkEndpoint& host, plRandom& ref_rng, bool bHandshake)
+  ///
+  /// The bystander is serviced throughout; a sweep that ignored it would let the host time it out for inactivity.
+  void SweepMessageIDs(NetworkEndpoint& host, NetworkEndpoint& bystander, plRandom& ref_rng, bool bHandshake)
   {
     plDynamicArray<plUInt8> payload;
     plUInt32 uiID = 1;
@@ -44,14 +40,14 @@ namespace
     while (uiID < 256)
     {
       HostileClient hostile(host.GetPort(), 0);
-      PumpHostile(host, hostile, 20);
-      if (!PL_TEST_BOOL(hostile.m_bConnected))
+      const Pumped pumped({&host, &bystander}, {&hostile});
+      if (!PL_TEST_BOOL(PumpAll(pumped, [&] { return hostile.m_bConnected; })))
         return;
 
       if (bHandshake)
       {
         hostile.Handshake();
-        PumpHostile(host, hostile, 10);
+        Settle(pumped);
       }
 
       while (uiID < 256 && !hostile.m_bDisconnected)
@@ -62,11 +58,11 @@ namespace
           hostile.SendWithID(static_cast<plUInt8>(uiID), payload.GetData(), payload.GetCount());
         }
 
-        PumpHostile(host, hostile, 2);
+        Settle(pumped);
         ++uiID;
       }
 
-      DisconnectHostile(host, hostile);
+      DisconnectHostile(pumped, host, hostile);
     }
   }
 
@@ -149,7 +145,7 @@ PL_CREATE_SIMPLE_TEST(Network, HostileMessageIDs)
 
     plRandom rng;
     rng.Initialize(s_uiFuzzSeed);
-    SweepMessageIDs(host, rng, false);
+    SweepMessageIDs(host, client, rng, false);
 
     // The well-behaved client was not disturbed and replication still works.
     PL_TEST_BOOL(host.m_pModule->GetPeer() != nullptr);
@@ -170,7 +166,7 @@ PL_CREATE_SIMPLE_TEST(Network, HostileMessageIDs)
 
     plRandom rng;
     rng.Initialize(s_uiFuzzSeed + 1);
-    SweepMessageIDs(host, rng, true);
+    SweepMessageIDs(host, client, rng, true);
 
     PL_TEST_BOOL(host.m_pModule->GetPeer() != nullptr);
     PL_TEST_BOOL(client.m_pModule->IsConnected());

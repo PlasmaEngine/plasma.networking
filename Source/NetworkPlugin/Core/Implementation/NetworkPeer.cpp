@@ -7,18 +7,19 @@
 #include <Foundation/Profiling/Profiling.h>
 #include <Foundation/System/SystemInformation.h>
 #include <Foundation/Memory/PageAllocator.h>
+#include <Foundation/Threading/Mutex.h>
 
 #if BUILDSYSTEM_ENABLE_ENET_SUPPORT
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 #endif
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
 
-plDynamicArray<plNetworkPeer*> plNetworkPeer::m_Peers;
-
-plUInt32 lastHostID = 0;
+plDynamicArray<plNetworkPeer*> plNetworkPeer::s_Peers;
 
 namespace
 {
+  plMutex s_PeersMutex;
+
   plNetworkDriverInterface* CreateDriver(plDriverTypeEnum::Enum driverType)
   {
     switch (driverType)
@@ -61,7 +62,15 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
 
   if(m_pDriver->Initalize(this, m_Config).Failed())
   {
-    // The Platform driver needs a backend with a transport; without one the peer runs on ENet instead.
+    // The Platform driver needs a backend with a transport; without one the peer runs on ENet instead. A transport that
+    // another peer in this process holds is not missing, so that peer fails instead of opening an ENet socket.
+    if (m_Config.m_DriverType == plDriverTypeEnum::Platform && static_cast<plDriverPlatform*>(m_pDriver)->IsTransportInUse())
+    {
+      plLog::Error("PL Net: Failed to initialize network driver: the platform transport belongs to another peer");
+      Shutdown();
+      return PL_FAILURE;
+    }
+
     if (m_Config.m_DriverType == plDriverTypeEnum::Platform)
     {
       plLog::Warning("PL Net: Platform transport unavailable, falling back to the ENet driver");
@@ -87,6 +96,15 @@ void plNetworkPeer::Shutdown()
 {
   if (!m_pDriver)
     return;
+
+  // Messages a host queued during the last update, such as the disconnect it broadcasts when it stops, still go out.
+  // A client has already dropped its connection by now (the driver's Disconnect tells the host), so its queue is
+  // discarded.
+  if (m_Role == plNetworkRoleEnum::Server)
+  {
+    FlushOutgoingBuffer();
+    m_pDriver->Flush();
+  }
 
   m_pDriver->Shutdown();
   PL_DEFAULT_DELETE(m_pDriver);
@@ -200,7 +218,6 @@ plNetworkPeer* plNetworkPeer::CreatePeer(const plNetworkConfig& config)
   }
 
   plNetworkPeer* pPeer = PL_DEFAULT_NEW(plNetworkPeer);
-  pPeer->m_iHostID = ++lastHostID;
 
   if(pPeer->Initialize(config).Failed())
   {
@@ -208,8 +225,15 @@ plNetworkPeer* plNetworkPeer::CreatePeer(const plNetworkConfig& config)
     return nullptr;
   }
 
-  m_Peers.PushBack(pPeer);
+  PL_LOCK(s_PeersMutex);
+  s_Peers.PushBack(pPeer);
   return pPeer;
+}
+
+plUInt32 plNetworkPeer::GetPeerCount()
+{
+  PL_LOCK(s_PeersMutex);
+  return s_Peers.GetCount();
 }
 
 void plNetworkPeer::DestroyPeer(plNetworkPeer* pPeer)
@@ -218,8 +242,10 @@ void plNetworkPeer::DestroyPeer(plNetworkPeer* pPeer)
     return;
 
   pPeer->Shutdown();
-  pPeer->m_iHostID = -1;
-  m_Peers.RemoveAndSwap(pPeer);
+  {
+    PL_LOCK(s_PeersMutex);
+    s_Peers.RemoveAndSwap(pPeer);
+  }
   PL_DEFAULT_DELETE(pPeer);
 }
 

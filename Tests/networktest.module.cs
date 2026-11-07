@@ -21,6 +21,10 @@ public class NetworkTestModule : ModuleRules
         {
             PublicIncludePaths.Add(Path.Combine(unitTestsRoot, "TestFramework", "Platform", "Win"));
         }
+        else if (context.Platform == TargetPlatform.Linux)
+        {
+            PublicIncludePaths.Add(Path.Combine(unitTestsRoot, "TestFramework", "Platform", "Linux"));
+        }
 
         PlasmaPackageSdk.AddImportLibrary(this, context, "plTestFramework");
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/NetworkPlugin", "plNetworkPlugin");

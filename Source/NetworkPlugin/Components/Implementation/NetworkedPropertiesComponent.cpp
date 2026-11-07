@@ -317,7 +317,8 @@ void plNetworkedPropertiesComponent::Update()
     return;
   m_LastPollTime = now;
 
-  bool bNeedsReplication = false;
+  bool bNeedsReplication = m_bThrottledChangePending;
+  m_bThrottledChangePending = false;
   plUInt8 uiBestPriority = 255;
   for (plUInt32 i = 0; i < m_ResolvedEntries.GetCount(); ++i)
   {
@@ -422,15 +423,20 @@ void plNetworkedPropertiesComponent::NetworkSerializeForClient(plNetworkMessage&
       continue;
     if (settings.m_Target == plReplicateTarget::NonOwner && uiRecipientClientID != 0 && uiRecipientClientID == uiOwnerClientID)
       continue;
-    if (!bInitialSync && lastSentTimes[i].GetSeconds() > 0.0 &&
-        now - lastSentTimes[i] < plTime::MakeFromSeconds(1.0 / plMath::Max(settings.m_fSendRate, 0.1f)))
-      continue;
-
     const plVariant value = GetCurrentValue(resolved);
     if (!value.IsValid())
       continue;
     if (!bInitialSync && settings.m_Condition == plReplicateCondition::OnChange && lastSent[i].IsValid() && lastSent[i] == value)
       continue;
+
+    // The world module clears the dirty flag after this call, so a change held back by the send rate must ask Update to
+    // mark the component dirty again, or it is never sent.
+    if (!bInitialSync && lastSentTimes[i].GetSeconds() > 0.0 &&
+        now - lastSentTimes[i] < plTime::MakeFromSeconds(1.0 / plMath::Max(settings.m_fSendRate, 0.1f)))
+    {
+      m_bThrottledChangePending = true;
+      continue;
+    }
 
     uiBitmask |= PL_BIT(i);
   }

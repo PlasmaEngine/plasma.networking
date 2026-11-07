@@ -120,6 +120,7 @@ private:
   plTime m_LastPollTime;
   plDynamicArray<plComponentHandle> m_TakenOverActors;
   bool m_bRemotePhysicsTakenOver = false;
+  bool m_bThrottledChangePending = false;
   plUInt8 m_uiDebugSendLogs = 0;
   plUInt8 m_uiDebugRecvLogs = 0;
 };
