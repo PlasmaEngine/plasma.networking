@@ -18,6 +18,18 @@ the package SDK, and `plasma.networking.workspace.cs` lists it next to the plugi
   block, "NW-F01 (M0 gate)", is the M0 gate: a host and two clients in one process replicate a property and tear down
   with no peers left. `DriverIsolation` covers NW-B46: every peer owns its driver, one client can stop and restart while
   the other keeps replicating, and a platform transport belongs to one driver at a time.
+- `NetworkReplicationTest.cpp` (`TwoClientReplication`) runs a host and two clients through the shipped replication
+  components: `plNetworkedPropertiesComponent` with server authority (only changed entries are sent), a scene
+  `plNetworkedTransformComponent` simulated by the host, an owning client's upload relayed by the host to the other client,
+  a client that joins late, 200 consecutive changes, and three teardown cases (the host stops with both clients connected,
+  a client world is destroyed without `Stop`, ten connect and destroy rounds). The harness adds `AddReplica`, `AddMover`,
+  `ConnectAll` and `PumpFor` for these.
+- `NetworkBandwidthTest.cpp` (`BandwidthBudget`) measures the bytes each client receives (ENet UDP payload, overhead
+  included) for idle traffic, one and sixteen replica changes, unchanged replicas, and a moving and a standing transform,
+  and checks them against the ceilings in `NetworkBudgets.h`. Every measurement is printed as a `NetworkBudget:` line.
+  To re-measure, run `-filter BandwidthBudget` a few times on Windows and Linux and read those lines; each ceiling is the
+  larger platform maximum plus 25 %. The block that checks `plNetworkBandwidthConfig::m_uiMaxBytesPerTick` is disabled,
+  because the send loop does not enforce that budget yet.
 - `NetworkFuzzTest.cpp` sweeps every message ID with empty, random, all-0xFF and all-zero payloads from an unadmitted and
   from an admitted client, then checks the host is up and a well-behaved client still replicates. It also feeds random
   buffers to the RPC, spawn, despawn, ownership, variant and string parsers in the host and client roles. The seed is fixed.
