@@ -6,6 +6,8 @@
 #include <Foundation/Threading/ThreadUtils.h>
 #include <GameEngine/PlatformServices/Interfaces/PlatformProviders.h>
 #include <NetworkPlugin/Components/NetworkComponent.h>
+#include <NetworkPlugin/Components/NetworkedPropertiesComponent.h>
+#include <NetworkPlugin/Components/NetworkedTransformComponent.h>
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
 #include <NetworkPlugin/Core/NetworkLevelManager.h>
@@ -37,11 +39,29 @@ public:
   }
 };
 
+class plNetworkReplicaTargetComponent;
+using plNetworkReplicaTargetComponentManager = plComponentManager<plNetworkReplicaTargetComponent, plBlockStorageType::Compact>;
+
+/// \brief A plain gameplay component whose reflected members a plNetworkedPropertiesComponent replicates.
+class plNetworkReplicaTargetComponent : public plComponent
+{
+  PL_DECLARE_COMPONENT_TYPE(plNetworkReplicaTargetComponent, plComponent, plNetworkReplicaTargetComponentManager);
+
+public:
+  plInt32 m_iValue = 0;
+  plVec3 m_vPosition = plVec3::MakeZero();
+};
+
 /// \brief Narrow test seams for constructing ownership and transport faults without loading gameplay assets.
 class plNetworkTestAccess
 {
 public:
   static ENetHost* Host(plNetworkPeer* pPeer) { return static_cast<plDriverEnet*>(pPeer->GetDriver())->m_pEnetHost; }
+
+  /// \brief UDP payload bytes this peer's ENet host has sent or received, all connections and protocol overhead included.
+  static plUInt64 BytesSent(plNetworkPeer* pPeer) { return pPeer ? Host(pPeer)->totalSentData : 0; }
+  static plUInt64 BytesReceived(plNetworkPeer* pPeer) { return pPeer ? Host(pPeer)->totalReceivedData : 0; }
+
   static void Role(plNetworkWorldModule* pModule, plNetworkRoleEnum::Enum role) { pModule->m_Role = role; }
   static void Own(plNetworkWorldModule* pModule, plGameObject* pObject, plUInt32 uiObjectID, plUInt32 uiClientID)
   {
@@ -89,6 +109,81 @@ namespace NetworkTestHarness
       m_pComponent->SetNetworkRole(plNetworkRoleEnum::Server);
       m_World.Update();
     }
+
+    /// \brief A scene object whose target component's Value and Position are replicated by a plNetworkedPropertiesComponent.
+    struct Replica
+    {
+      plGameObject* m_pObject = nullptr;
+      plNetworkReplicaTargetComponent* m_pTarget = nullptr;
+      plNetworkedPropertiesComponent* m_pProperties = nullptr;
+    };
+
+    plHybridArray<Replica, 16> m_Replicas;
+
+    /// \brief Adds a replica named sName. Every endpoint must add the same names in the same order, because scene NetIDs
+    /// are hashed from the object path. Interpolation is off, so a received value is applied as it arrives.
+    Replica& AddReplica(plStringView sName, plReplicateAuthority::Enum authority)
+    {
+      PL_LOCK(m_World.GetWriteMarker());
+      plGameObjectDesc desc;
+      desc.m_sName.Assign(sName);
+      desc.m_bDynamic = true;
+
+      Replica& replica = m_Replicas.ExpandAndGetRef();
+      m_World.CreateObject(desc, replica.m_pObject);
+      m_World.GetOrCreateComponentManager<plNetworkReplicaTargetComponentManager>()->CreateComponent(replica.m_pObject, replica.m_pTarget);
+      m_World.GetOrCreateComponentManager<plNetworkedPropertiesComponentManager>()->CreateComponent(replica.m_pObject, replica.m_pProperties);
+
+      plNetworkedPropertiesComponent* pProperties = replica.m_pProperties;
+      pProperties->m_Authority = authority;
+      pProperties->m_fInterpolationTime = 0.0f;
+      pProperties->m_fSendRate = 60.0f;
+      for (const char* szProperty : {"Value", "Position"})
+      {
+        plNetworkedPropertyEntry& entry = pProperties->m_Properties.ExpandAndGetRef();
+        entry.m_sComponentType = plGetStaticRTTI<plNetworkReplicaTargetComponent>()->GetTypeName();
+        entry.m_sProperty = szProperty;
+      }
+
+      m_World.Update();
+      return replica;
+    }
+
+    /// \brief Adds a scene object with a plNetworkedTransformComponent. Bounds are tight so 16-bit positions resolve to ~2 mm.
+    plGameObject* AddMover(plStringView sName, plNetworkedTransformComponent** out_pComponent = nullptr)
+    {
+      PL_LOCK(m_World.GetWriteMarker());
+      plGameObjectDesc desc;
+      desc.m_sName.Assign(sName);
+      desc.m_bDynamic = true;
+      desc.m_LocalPosition.Set(1.0f, 2.0f, 3.0f);
+      plGameObject* pObject = nullptr;
+      m_World.CreateObject(desc, pObject);
+
+      plNetworkedTransformComponent* pComponent = nullptr;
+      m_World.GetOrCreateComponentManager<plNetworkedTransformComponentManager>()->CreateComponent(pObject, pComponent);
+      pComponent->m_vWorldBoundsMin = plVec3(-64.0f);
+      pComponent->m_vWorldBoundsMax = plVec3(64.0f);
+      if (out_pComponent)
+        *out_pComponent = pComponent;
+
+      m_World.Update();
+      return pObject;
+    }
+
+    /// \brief The host's record of the client that this endpoint is, or null.
+    plNetworkClient* FindClient(const NetworkEndpoint& client)
+    {
+      for (plNetworkClient* pClient : m_pModule->GetClients())
+      {
+        if (pClient && pClient->m_uiClientID == client.m_pModule->GetLocalClientID())
+          return pClient;
+      }
+      return nullptr;
+    }
+
+    plUInt64 BytesSent() const { return plNetworkTestAccess::BytesSent(m_pModule->GetPeer()); }
+    plUInt64 BytesReceived() const { return plNetworkTestAccess::BytesReceived(m_pModule->GetPeer()); }
 
     void Pump()
     {
@@ -161,6 +256,36 @@ namespace NetworkTestHarness
       plThreadUtils::YieldTimeSlice();
     } while (plTime::Now() < deadline);
     return false;
+  }
+
+  /// \brief Services everything in the set for a fixed wall-clock duration. Only for traffic that is itself time-driven
+  /// (pings, time sync, send-rate throttles); waits for an outcome go through PumpAll.
+  inline void PumpFor(const Pumped& pumped, plTime duration)
+  {
+    PumpAll(pumped, [] { return false; }, duration);
+  }
+
+  /// \brief Starts the host and every client, then waits until each client is admitted and the host lists all of them.
+  inline bool ConnectAll(const Pumped& pumped, NetworkEndpoint& host, std::initializer_list<NetworkEndpoint*> clients)
+  {
+    if (!host.Start(true))
+      return false;
+
+    for (NetworkEndpoint* pClient : clients)
+    {
+      if (!pClient->Start(false, host.GetPort()))
+        return false;
+    }
+
+    return PumpAll(pumped, [&]
+      {
+        for (NetworkEndpoint* pClient : clients)
+        {
+          if (!pClient->m_pModule->IsConnected() || host.FindClient(*pClient) == nullptr)
+            return false;
+        }
+        return true;
+      });
   }
 
   /// \brief Pumps the host and up to two clients until the predicate holds or five seconds pass.
