@@ -187,6 +187,10 @@ public static class PlasmaPackageSdk
 
         rules.PublicIncludePaths.Add(Path.Combine(joltRoot, "ThirdParty", "Jolt"));
 
+        // Jolt's own headers include <Jolt/...>, so the folder above it has to be on the path too. The
+        // engine's Code/ThirdParty used to provide that until its copy of Jolt was removed.
+        rules.PublicIncludePaths.Add(Path.Combine(joltRoot, "ThirdParty"));
+
         // NetworkPluginPCH.h includes <JoltPlugin/JoltPluginPCH.h>, so the directory holding the
         // plugin folder has to be on the include path.
         rules.PublicIncludePaths.Add(Path.Combine(joltRoot, "Source"));
