@@ -282,6 +282,25 @@ PL_CREATE_SIMPLE_TEST(Network, RpcRouting)
     PL_TEST_INT(Count(session.Probe(session.m_A), plNetworkRpcTarget::AllClients), 1);
   }
 
+  PL_TEST_BLOCK(plTestBlock::Enabled, "An argument that does not convert to the parameter type refuses the call; one that converts is sent converted")
+  {
+    RpcSession session;
+    if (!PL_TEST_BOOL(session.Start(Role::Host, session.m_Prefabs.m_sProbe)))
+      return;
+
+    {
+      PL_LOCK(session.m_Server.m_World.GetWriteMarker());
+      plNetworkRpcManager* pRpc = session.m_Server.m_pModule->GetRpcManager();
+      PL_TEST_BOOL(!pRpc->CallRpc(session.Probe(session.m_Server), "RpcServer", plVec3(1.0f)));
+      PL_TEST_BOOL(pRpc->CallRpc(session.Probe(session.m_Server), "RpcAllClients", 2.0f));
+    }
+
+    PL_TEST_INT(session.Probe(session.m_Server)->m_uiServer, 0);
+    NETWORK_TEST_WAIT(PumpAll(session.m_All, [&] { return Count(session.Probe(session.m_A), plNetworkRpcTarget::AllClients) == 1; }), "A ran it %u times",
+      Count(session.Probe(session.m_A), plNetworkRpcTarget::AllClients));
+    PL_TEST_INT(session.Probe(session.m_A)->m_Arguments.IsEmpty() ? -1 : session.Probe(session.m_A)->m_Arguments[0], 2);
+  }
+
   PL_TEST_BLOCK(plTestBlock::Enabled, "D12: reliable RPCs queued in one frame arrive in order")
   {
     RpcSession session;
