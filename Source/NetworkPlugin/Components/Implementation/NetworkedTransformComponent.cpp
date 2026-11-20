@@ -79,6 +79,9 @@ void plNetworkedTransformComponent::OnSimulationStarted()
 {
   plNetworkComponent::OnSimulationStarted();
 
+  // The owner writes the transform; the server owns, and so simulates, what no client owns.
+  SetNetworkRole(plNetworkRoleEnum::Client);
+
   m_vReplicatedPosition = GetOwner()->GetGlobalPosition();
   m_qReplicatedRotation = GetOwner()->GetGlobalRotation();
   m_vPrevPosition = m_vReplicatedPosition;
@@ -106,15 +109,10 @@ void plNetworkedTransformComponent::Update()
   }
 
   // The owning client simulates an owned object; the host or server simulates everything nobody owns (scene objects).
-  bool bIsLocal = false;
-  if (const plNetworkObjectInfo* pInfo = GetNetID() != 0 ? m_pNetworkModule->FindOwningObject(this) : nullptr)
-  {
-    bIsLocal = pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
-  }
-  else
-  {
-    bIsLocal = m_pNetworkModule->IsHost() || m_pNetworkModule->IsServer();
-  }
+  // A client still in its handshake has no client ID yet and owns nothing.
+  const plUInt32 uiOwner = m_pNetworkModule->GetOwnerClientID(this);
+  const bool bIsLocal = m_pNetworkModule->IsClient() ? m_pNetworkModule->IsConnected() && uiOwner == m_pNetworkModule->GetLocalClientID()
+                                                      : uiOwner == m_pNetworkModule->GetServerClientID();
 
   // One-time authority notification
   if (!m_bAuthorityInitialized && GetNetID() != 0)
@@ -260,12 +258,7 @@ void plNetworkedTransformComponent::BroadcastStateToClients(bool bIncludeOwner)
   if (!m_pNetworkModule || !m_pNetworkModule->GetPeer())
     return;
 
-  plUInt32 uiExcludeClientID = plInvalidIndex;
-  if (!bIncludeOwner)
-  {
-    if (const plNetworkObjectInfo* pInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(GetNetID()))
-      uiExcludeClientID = pInfo->m_uiOwnerClientID;
-  }
+  const plUInt32 uiExcludeClientID = bIncludeOwner ? plInvalidIndex : m_pNetworkModule->GetOwnerClientID(this);
 
   plNetworkMessage msg = m_pNetworkModule->GetPeer()->BeginSendMessage();
   WriteTransformState(msg);
@@ -312,8 +305,8 @@ void plNetworkedTransformComponent::HandleTransformStateMessage(plNetworkMessage
     m_Interpolator.AddSnapshot(t, vVel, serverSendTime, plNetworkClock::Now(), ++m_uiSnapshotSequence);
   }
 
-  // Host: relay client-uploaded state to other clients (exclude owner; they already have it).
-  if (m_pNetworkModule && m_pNetworkModule->IsHost())
+  // A host or dedicated server relays the owner's upload to everyone else.
+  if (m_pNetworkModule && !m_pNetworkModule->IsClient())
   {
     BroadcastStateToClients(false);
   }

@@ -138,6 +138,10 @@ void plNetworkedPropertiesComponent::OnSimulationStarted()
 
 void plNetworkedPropertiesComponent::ResolveEntries()
 {
+  if (m_bEntriesResolved)
+    return;
+
+  m_bEntriesResolved = true;
   m_ResolvedEntries.Clear();
   m_ResolvedEntries.SetCount(plMath::Min<plUInt32>(m_Properties.GetCount(), 32));
 
@@ -235,26 +239,37 @@ plVariant plNetworkedPropertiesComponent::GetCurrentValue(const ResolvedEntry& e
   return plReflectionUtils::GetMemberPropertyValue(entry.m_pProperty, entry.m_pInstance);
 }
 
+plVariant plNetworkedPropertiesComponent::GetReplicatedValue(const ResolvedEntry& entry) const
+{
+  return entry.m_bInterpolating ? entry.m_InterpTarget : GetCurrentValue(entry);
+}
+
 void plNetworkedPropertiesComponent::WriteValue(
-  plNetworkMessage& msg, const ResolvedEntry& entry, plNetSerializeEncoding::Enum encoding) const
+  plNetworkMessage& msg, const ResolvedEntry& entry, const plVariant& value, plNetSerializeEncoding::Enum encoding) const
 {
   if (entry.m_Kind == ResolvedEntry::Kind::GameObjectTags)
   {
-    const plTagSet& tags = GetOwner()->GetTags();
-    const plUInt32 uiCount = plMath::Min<plUInt32>(tags.GetNumTagsSet(), 64);
+    const plVariantArray& tags = value.Get<plVariantArray>();
+    const plUInt32 uiCount = plMath::Min<plUInt32>(tags.GetCount(), 64);
     msg.WriteUInt8(static_cast<plUInt8>(uiCount));
 
-    plUInt32 uiWritten = 0;
-    for (const plTag& tag : tags)
-    {
-      if (uiWritten++ >= uiCount)
-        break;
-      msg.WriteString(tag.GetTagString());
-    }
+    for (plUInt32 i = 0; i < uiCount; ++i)
+      msg.WriteString(tags[i].ConvertTo<plString>());
     return;
   }
 
-  plNetworkSerializer::WriteVariantEncoded(msg, GetCurrentValue(entry), encoding);
+  plNetworkSerializer::WriteVariantEncoded(msg, value, encoding);
+}
+
+bool plNetworkedPropertiesComponent::IsSentTo(plUInt32 uiEntry, plUInt32 uiRecipientClientID, plUInt32 uiOwnerClientID) const
+{
+  // Recipient 0 is the server: an owner's upload carries every entry.
+  const plNetworkReplicationProfileDescriptor settings = GetSettings(uiEntry);
+  if (settings.m_Target == plReplicateTarget::OwnerOnly && uiRecipientClientID != 0 && uiRecipientClientID != uiOwnerClientID)
+    return false;
+  if (settings.m_Target == plReplicateTarget::NonOwner && uiRecipientClientID != 0 && uiRecipientClientID == uiOwnerClientID)
+    return false;
+  return true;
 }
 
 plVariant plNetworkedPropertiesComponent::ReadValue(
@@ -382,18 +397,8 @@ plNetworkReplicationProfileDescriptor plNetworkedPropertiesComponent::GetSetting
 
 plUInt32 plNetworkedPropertiesComponent::GetOwnerClientID() const
 {
-  if (m_pNetworkModule == nullptr)
-    return 0;
-
-  const plNetworkObjectManager* pObjectManager = m_pNetworkModule->GetObjectManager();
-  if (const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(GetNetID()))
-    return pInfo->m_uiOwnerClientID;
-
-  const plUInt32 uiObjectID = pObjectManager->GetNetworkID(GetOwner()->GetHandle());
-  if (const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(uiObjectID))
-    return pInfo->m_uiOwnerClientID;
-
-  return m_pNetworkModule->GetServerClientID();
+  const plNetworkWorldModule* pModule = m_pNetworkModule ? m_pNetworkModule : GetWorld()->GetModule<plNetworkWorldModule>();
+  return pModule ? pModule->GetOwnerClientID(this) : 0;
 }
 
 void plNetworkedPropertiesComponent::NetworkSerialize(plNetworkMessage& msg)
@@ -403,6 +408,8 @@ void plNetworkedPropertiesComponent::NetworkSerialize(plNetworkMessage& msg)
 
 void plNetworkedPropertiesComponent::NetworkSerializeForClient(plNetworkMessage& msg, plUInt32 uiRecipientClientID, bool bInitialSync)
 {
+  ResolveEntries();
+
   plDynamicArray<plVariant>& lastSent = m_LastSentValues[uiRecipientClientID];
   plDynamicArray<plTime>& lastSentTimes = m_LastSentTimes[uiRecipientClientID];
   lastSent.SetCount(m_ResolvedEntries.GetCount());
@@ -420,11 +427,9 @@ void plNetworkedPropertiesComponent::NetworkSerializeForClient(plNetworkMessage&
 
     if (settings.m_Condition == plReplicateCondition::InitialOnly && !bInitialSync)
       continue;
-    if (settings.m_Target == plReplicateTarget::OwnerOnly && uiRecipientClientID != 0 && uiRecipientClientID != uiOwnerClientID)
+    if (!IsSentTo(i, uiRecipientClientID, uiOwnerClientID))
       continue;
-    if (settings.m_Target == plReplicateTarget::NonOwner && uiRecipientClientID != 0 && uiRecipientClientID == uiOwnerClientID)
-      continue;
-    const plVariant value = GetCurrentValue(resolved);
+    const plVariant value = GetReplicatedValue(resolved);
     if (!value.IsValid())
       continue;
     if (!bInitialSync && settings.m_Condition == plReplicateCondition::OnChange && lastSent[i].IsValid() && lastSent[i] == value)
@@ -449,16 +454,50 @@ void plNetworkedPropertiesComponent::NetworkSerializeForClient(plNetworkMessage&
     if ((uiBitmask & PL_BIT(i)) == 0)
       continue;
 
-    const plVariant value = GetCurrentValue(m_ResolvedEntries[i]);
+    const plVariant value = GetReplicatedValue(m_ResolvedEntries[i]);
     const plNetworkReplicationProfileDescriptor settings = GetSettings(i);
-    WriteValue(msg, m_ResolvedEntries[i], settings.m_Encoding);
+    WriteValue(msg, m_ResolvedEntries[i], value, settings.m_Encoding);
     lastSent[i] = value;
     lastSentTimes[i] = now;
   }
 }
 
+void plNetworkedPropertiesComponent::NetworkRelayForClient(plNetworkMessage& in_received, plNetworkMessage& out_msg, plUInt32 uiRecipientClientID)
+{
+  ResolveEntries();
+
+  const plUInt32 uiReceivedMask = in_received.ReadUInt32();
+  const plUInt32 uiOwnerClientID = GetOwnerClientID();
+
+  plHybridArray<plVariant, 32> values;
+  plUInt32 uiRelayMask = 0;
+  for (plUInt32 i = 0; i < m_ResolvedEntries.GetCount() && !in_received.HasReadError(); ++i)
+  {
+    if ((uiReceivedMask & PL_BIT(i)) == 0)
+      continue;
+
+    const plVariant value = ReadValue(in_received, m_ResolvedEntries[i], GetSettings(i).m_Encoding);
+    if (in_received.HasReadError() || !value.IsValid())
+      break;
+    if (!IsSentTo(i, uiRecipientClientID, uiOwnerClientID))
+      continue;
+
+    uiRelayMask |= PL_BIT(i);
+    values.PushBack(value);
+  }
+
+  out_msg.WriteUInt32(uiRelayMask);
+  plUInt32 uiValue = 0;
+  for (plUInt32 i = 0; i < m_ResolvedEntries.GetCount(); ++i)
+  {
+    if ((uiRelayMask & PL_BIT(i)) != 0)
+      WriteValue(out_msg, m_ResolvedEntries[i], values[uiValue++], GetSettings(i).m_Encoding);
+  }
+}
+
 void plNetworkedPropertiesComponent::NetworkDeserialize(plNetworkMessage& msg)
 {
+  ResolveEntries();
   const plUInt32 uiBitmask = msg.ReadUInt32();
 
   if (m_uiDebugRecvLogs < 5)

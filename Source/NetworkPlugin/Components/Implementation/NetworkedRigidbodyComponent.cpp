@@ -58,20 +58,7 @@ bool plNetworkedRigidbodyComponent::HasStateAuthority() const
   if (!m_pNetworkModule)
     return false;
 
-  // Use base class NetID which is set by the spawn system
-  plUInt32 netID = GetNetID();
-  
-  // If we don't have a network ID yet, fallback to server/host
-  if (netID == 0)
-  {
-    return m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost();
-  }
-
-  auto* pObjectManager = m_pNetworkModule->GetObjectManager();
-  if (!pObjectManager)
-    return false;
-
-  const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(netID);
+  const plNetworkObjectInfo* pInfo = m_pNetworkModule->FindOwningObject(this);
   if (!pInfo)
   {
     // Object not found in manager - fallback to server/host authority
@@ -97,19 +84,8 @@ bool plNetworkedRigidbodyComponent::HasInputAuthority() const
   if (!m_pNetworkModule)
     return false;
 
-  plUInt32 netID = GetNetID();
-  if (netID == 0)
-    return false;
-
-  auto* pObjectManager = m_pNetworkModule->GetObjectManager();
-  if (!pObjectManager)
-    return false;
-
-  const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(netID);
-  if (!pInfo)
-    return false;
-
-  return pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
+  const plNetworkObjectInfo* pInfo = m_pNetworkModule->FindOwningObject(this);
+  return pInfo != nullptr && pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
 }
 
 void plNetworkedRigidbodyComponent::Update()

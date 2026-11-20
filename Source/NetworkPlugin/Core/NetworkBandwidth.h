@@ -143,6 +143,9 @@ public:
   /// @brief Get the priority for a component
   plNetworkPriority::Enum GetComponentPriority(plUInt32 uiNetworkID) const;
 
+  /// @brief Forgets what is recorded for a component that stopped replicating.
+  void RemoveComponentState(plUInt32 uiNetworkID) { m_ComponentStates.Remove(uiNetworkID); }
+
   /// @brief Queue a component update for priority-based sending
   void QueueUpdate(plNetworkComponent* pComponent, plUInt32 uiEstimatedSize);
 

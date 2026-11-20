@@ -64,5 +64,4 @@ private:
   bool m_bLoggedMissingBoard = false;
 
   /// Spawned objects assign the same NetID to every plNetworkComponent on the owner; we derive a unique ID for routing.
-  plUInt32 m_uiOwnerObjectNetID = 0;
 };

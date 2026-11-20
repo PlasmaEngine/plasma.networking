@@ -302,17 +302,7 @@ bool plNetworkRpcManager::CallRpc(
 
     case plNetworkRpcTarget::Owner:
     {
-      // Get owner from the network object manager
-      plUInt32 ownerClientID = 0;
-      plNetworkComponent* pNetComp = nullptr;
-      if (pComponent->GetOwner()->TryGetComponentOfBaseType(pNetComp) && pNetComp->GetNetID() != 0)
-      {
-        const plNetworkObjectInfo* pObjInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(pNetComp->GetNetID());
-        if (pObjInfo)
-        {
-          ownerClientID = pObjInfo->m_uiOwnerClientID;
-        }
-      }
+      const plUInt32 ownerClientID = m_pNetworkModule->GetOwnerClientID(pComponent);
 
       if (m_pNetworkModule->GetLocalClientID() == ownerClientID)
       {
@@ -576,26 +566,30 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
   if (!m_pNetworkModule)
     return;
 
+  const plUInt32 uiStart = msg.m_uiPosition;
   plUInt32 rpcID = msg.ReadUInt32();
   plUInt32 componentNetID = msg.ReadUInt32();
   if (msg.HasReadError())
     return;
 
-  // Find the RPC info
+  // A call from the server for a component that has not started yet (a fresh spawn) runs once it starts, and calls
+  // behind it wait with it. Components register their RPCs when they start, so this comes before the RPC lookup.
+  plNetworkComponent* pComponent = m_pNetworkModule->FindNetworkComponent(componentNetID);
+  if (pComponent == nullptr || m_pNetworkModule->IsHoldingMessagesFor(componentNetID))
+  {
+    if (m_pNetworkModule->IsClient() && uiSenderClientID == m_pNetworkModule->GetServerClientID())
+      m_pNetworkModule->HoldRpcForComponent(componentNetID, uiSenderClientID, plArrayPtr<const plUInt8>(msg.m_pBuffer + uiStart, msg.m_uiLength - uiStart));
+    else
+      plLog::Warning("PL Net: RPC target component {} not found", componentNetID);
+
+    msg.m_uiPosition = msg.m_uiLength;
+    return;
+  }
+
   const plNetworkRpcInfo* pRpcInfo = GetRpcInfo(rpcID);
   if (!pRpcInfo)
   {
     plLog::Warning("PL Net: Received unknown RPC ID {}", rpcID);
-    return;
-  }
-
-  // Component IDs are hashes, not keys in the spawned-object table. Resolve the exact
-  // component first, then walk its owning hierarchy for authorization.
-  plNetworkComponent* pComponent = m_pNetworkModule->FindNetworkComponent(componentNetID);
-
-  if (!pComponent)
-  {
-    plLog::Warning("PL Net: RPC target component {} not found", componentNetID);
     return;
   }
 

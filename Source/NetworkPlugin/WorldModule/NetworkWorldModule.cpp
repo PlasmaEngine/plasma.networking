@@ -89,22 +89,6 @@ namespace
     hash = plHashingUtils::CombineHashValues32(hash, uiTypeIndex);
     return hash | 0x80000000u;
   }
-
-  plUInt32 ComputeSpawnedComponentNetID(plUInt32 uiObjectNetID, const plNetworkComponent* pComponent)
-  {
-    plUInt32 uiTypeIndex = 0;
-    for (const plComponent* pSibling : pComponent->GetOwner()->GetComponents())
-    {
-      if (pSibling == pComponent)
-        break;
-      if (pSibling->GetDynamicRTTI() == pComponent->GetDynamicRTTI())
-        ++uiTypeIndex;
-    }
-
-    plUInt32 hash = plHashingUtils::CombineHashValues32(uiObjectNetID, plHashingUtils::StringHash(pComponent->GetDynamicRTTI()->GetTypeName()));
-    hash = plHashingUtils::CombineHashValues32(hash, uiTypeIndex);
-    return hash == 0 ? 1 : hash;
-  }
 }
 
 plNetworkWorldModule::plNetworkWorldModule(plWorld* pWorld)
@@ -413,6 +397,10 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   StopPeer();
   m_LevelManager.Shutdown();
   m_LevelManager.Initialize(this);
+
+  m_HeldMessages.Clear();
+  m_HeldReady.Clear();
+  m_uiHeldBytes = 0;
   if (m_pLocalClient)
   {
     PL_DEFAULT_DELETE(m_pLocalClient);
@@ -427,69 +415,46 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
 
 void plNetworkWorldModule::RegisterNetworkComponent(plNetworkComponent* pComponent)
 {
-  if (pComponent)
+  if (pComponent == nullptr || m_NetworkComponents.Contains(pComponent))
+    return;
+
+  // A spawned component got its NetID at instantiation. A scene component hashes its path; components with the same
+  // path chain the hash in the order they register, which is the same on every peer that loads the scene.
+  if (pComponent->GetNetID() == 0)
   {
-    // Check if there's a pending spawn network ID (we're in the middle of spawning a network object)
-    plUInt32 pendingID = m_ObjectManager.GetPendingSpawnNetworkID();
-    if (pendingID != 0)
-    {
-      pComponent->SetNetID(ComputeSpawnedComponentNetID(pendingID, pComponent));
-    }
-    else
-    {
-      // Check if this component belongs to a network-spawned object
-      // If so, use the object's network ID so it matches across server/client
-      plGameObjectHandle hOwner = pComponent->GetOwner()->GetHandle();
-      plUInt32 networkObjectID = m_ObjectManager.GetNetworkID(hOwner);
-      
-      if (networkObjectID != 0)
-      {
-        pComponent->SetNetID(ComputeSpawnedComponentNetID(networkObjectID, pComponent));
-      }
-      else
-      {
-        // Scene object - deterministic ID from hierarchical name path + component type.
-        plGameObject* pOwner = pComponent->GetOwner();
-        const plUInt32 sceneID = ComputeSceneNetID(pComponent);
+    plUInt32 uiSceneID = ComputeSceneNetID(pComponent);
+    for (plUInt32 uiChain = 1; m_ComponentsByNetID.Contains(uiSceneID); ++uiChain)
+      uiSceneID = plHashingUtils::CombineHashValues32(uiSceneID, uiChain) | 0x80000000u;
 
-        for (plNetworkComponent* pExisting : m_NetworkComponents)
-        {
-          if (pExisting != pComponent && pExisting->GetNetID() == sceneID)
-          {
-            plLog::Warning(
-              "PL Net: Scene NetID collision {} between '{}' and '{}' - replication will alias these objects; give them unique names.",
-              sceneID,
-              BuildGameObjectPath(pExisting->GetOwner()),
-              BuildGameObjectPath(pOwner));
-            break;
-          }
-        }
-
-        pComponent->SetNetID(sceneID);
-      }
-    }
-    
-    m_NetworkComponents.PushBack(pComponent);
-    
-    // If we're already connected, notify the component immediately
-    if (m_Status == plNetworkConnectionState::Connected)
-    {
-      pComponent->OnNetworkStateChanged(m_Status);
-    }
+    pComponent->SetNetID(uiSceneID);
+  }
+  else if (plNetworkComponent* pExisting = FindNetworkComponent(pComponent->GetNetID()))
+  {
+    plLog::Warning("PL Net: NetID {} of '{}' is already used by '{}'", pComponent->GetNetID(), BuildGameObjectPath(pComponent->GetOwner()),
+      BuildGameObjectPath(pExisting->GetOwner()));
   }
 
-  if (m_uiNextNetID > 4000000000)
-  {
-    plLog::Error("PL Net: Too many networked items in use");
-  }
+  m_NetworkComponents.PushBack(pComponent);
+  m_ComponentsByNetID[pComponent->GetNetID()] = pComponent;
+
+  // Messages that arrived before the component started are applied at the start of the next update, ahead of newer ones.
+  if (m_HeldMessages.Contains(pComponent->GetNetID()))
+    m_HeldReady.PushBack(pComponent->GetNetID());
+
+  if (m_Status == plNetworkConnectionState::Connected)
+    pComponent->OnNetworkStateChanged(m_Status);
 }
 
 void plNetworkWorldModule::RemoveNetworkComponent(plNetworkComponent* pComponent)
 {
-  if (m_NetworkComponents.Contains(pComponent))
-  {
-    m_NetworkComponents.RemoveAndSwap(pComponent);
-  }
+  if (!m_NetworkComponents.RemoveAndSwap(pComponent))
+    return;
+
+  plNetworkComponent* pMapped = nullptr;
+  if (m_ComponentsByNetID.TryGetValue(pComponent->GetNetID(), pMapped) && pMapped == pComponent)
+    m_ComponentsByNetID.Remove(pComponent->GetNetID());
+
+  m_BandwidthManager.RemoveComponentState(pComponent->GetNetID());
 }
 
 void plNetworkWorldModule::RegisterNetworkObject(plNetworkObject* pNetObject)
@@ -561,6 +526,9 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
   }
 
   PL_PROFILE_SCOPE("Network Update");
+
+  // What arrived before its component started is applied ahead of anything newer.
+  ReleaseHeldMessages();
 
   // Drain incoming events every frame so ENet can flush/receive without tick aliasing.
   plNetworkEvent event;
@@ -779,85 +747,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
               break;
             }
 
-            // Validate authority before applying state update
-            if (!ValidateStateUpdate(msgData.m_uiUUID, senderClientID))
-            {
-              plLog::Warning("PL Net: Rejected unauthorized state update from client {} for component {}",
-                senderClientID, msgData.m_uiUUID);
-              break;
-            }
-
-            bool bFoundComponent = false;
-            plNetworkComponent* pReplicatedComponent = nullptr;
-            for (plNetworkComponent* pComponent : m_NetworkComponents)
-            {
-              if (msgData.m_uiUUID == pComponent->GetNetID())
-              {
-                bFoundComponent = true;
-                pReplicatedComponent = pComponent;
-                pComponent->NetworkDeserialize(event.m_Message);
-                break; // Found it, no need to continue
-              }
-            }
-            
-            if (!bFoundComponent)
-            {
-              plLog::Warning("PL Net: No component found with NetID {} (total: {})", 
-                msgData.m_uiUUID, m_NetworkComponents.GetCount());
-            }
-              else if (!m_bStopRequested && !event.m_Message.HasReadError() && (IsServer() || IsHost()) && pClient != nullptr && pReplicatedComponent != nullptr &&
-                      (pReplicatedComponent->GetNetworkRole() == plNetworkRoleEnum::Client ||
-                       pReplicatedComponent->GetNetworkRole() == plNetworkRoleEnum::Both))
-            {
-              // Client-role uploads (e.g. owner-writable blackboard) only arrive at the host — relay to other clients.
-              plDynamicArray<plNetworkConnection> connections;
-              for (plNetworkClient* pTargetClient : m_pClients)
-              {
-                if (pTargetClient && pTargetClient->m_ConnectionState == plNetworkConnectionState::Connected &&
-                    pTargetClient->m_uiClientID != pClient->m_uiClientID)
-                {
-                  connections.PushBack(pTargetClient->m_Connection);
-                }
-              }
-
-              if (connections.GetCount() > 0)
-              {
-                if (pReplicatedComponent->RequiresPerRecipientSerialization())
-                {
-                  for (plNetworkClient* pTargetClient : m_pClients)
-                  {
-                    if (!pTargetClient || pTargetClient->m_ConnectionState != plNetworkConnectionState::Connected ||
-                        pTargetClient->m_uiClientID == pClient->m_uiClientID)
-                      continue;
-
-                    plNetworkMessage relayMsg = m_pPeer->BeginSendMessage();
-                    WriteReplicationHeader(relayMsg, m_uiServerClientID, pReplicatedComponent->GetNetID());
-                    pReplicatedComponent->NetworkSerializeForClient(relayMsg, pTargetClient->m_uiClientID, false);
-                    relayMsg.SetChannelType(pReplicatedComponent->GetChannelType());
-                    m_BandwidthManager.RecordBytesSent(relayMsg.m_uiLength);
-                    m_pPeer->SendTo(relayMsg, pTargetClient->m_Connection).IgnoreResult();
-                  }
-                }
-                else
-                {
-                  plNetworkMessage relayMsg = m_pPeer->BeginSendMessage();
-                  WriteReplicationHeader(relayMsg, m_uiServerClientID, pReplicatedComponent->GetNetID());
-                  pReplicatedComponent->NetworkSerialize(relayMsg);
-                  relayMsg.SetChannelType(pReplicatedComponent->GetChannelType());
-                  m_BandwidthManager.RecordBytesSent(relayMsg.m_uiLength * connections.GetCount());
-                  m_pPeer->SendTo(relayMsg, connections.GetArrayPtr()).IgnoreResult();
-                }
-              }
-            }
-
-            for (plNetworkObject* pNetObject : m_NetworkObjects)
-            {
-              if (msgData.m_uiUUID == pNetObject->GetNetID())
-              {
-                pNetObject->OnNetworkMessage(event.m_Message);
-              }
-            }
-
+            HandleReplicationMessage(event.m_Message, msgData.m_uiUUID, senderClientID);
             break;
           }
           case plNetworkMessageIDs::Disconnect:
@@ -1069,6 +959,157 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
   LogInfo();
 }
 
+void plNetworkWorldModule::HandleReplicationMessage(plNetworkMessage& msg, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID)
+{
+  plNetworkComponent* pComponent = FindNetworkComponent(uiComponentNetID);
+
+  if (pComponent == nullptr)
+  {
+    for (plNetworkObject* pNetObject : m_NetworkObjects)
+    {
+      if (uiComponentNetID == pNetObject->GetNetID())
+      {
+        pNetObject->OnNetworkMessage(msg);
+        return;
+      }
+    }
+  }
+
+  // A client gets state for a component that has not started yet: a spawned one, or one in a level still loading.
+  if (pComponent == nullptr || m_HeldMessages.Contains(uiComponentNetID))
+  {
+    if (IsClient() && uiSenderClientID == m_uiServerClientID)
+      HoldMessage(HeldMessage::Kind::State, uiComponentNetID, uiSenderClientID, plArrayPtr<const plUInt8>(msg.m_pBuffer + msg.m_uiPosition, msg.GetRemainingBytes()));
+    else
+      plLog::Warning("PL Net: Rejected state update from client {} for unknown component {}", uiSenderClientID, uiComponentNetID);
+
+    msg.m_uiPosition = msg.m_uiLength;
+    return;
+  }
+
+  if (!ValidateStateUpdate(uiComponentNetID, uiSenderClientID))
+  {
+    plLog::Warning("PL Net: Rejected unauthorized state update from client {} for component {}", uiSenderClientID, uiComponentNetID);
+    msg.m_uiPosition = msg.m_uiLength;
+    return;
+  }
+
+  const plUInt32 uiPayloadStart = msg.m_uiPosition;
+  pComponent->NetworkDeserialize(msg);
+  if (msg.HasReadError() || m_bStopRequested)
+    return;
+
+  // An owner's upload reaches only the server; the others get what the owner sent, not the server's copy of it, which
+  // may still be blending towards the received value.
+  if (!IsClient() && uiSenderClientID != m_uiServerClientID)
+    RelayComponentState(pComponent, uiSenderClientID, plArrayPtr<const plUInt8>(msg.m_pBuffer + uiPayloadStart, msg.m_uiLength - uiPayloadStart));
+}
+
+void plNetworkWorldModule::RelayComponentState(plNetworkComponent* pComponent, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> payload)
+{
+  plHybridArray<plNetworkClient*, 32> clients;
+  GetConnectedClients(clients);
+
+  for (plNetworkClient* pClient : clients)
+  {
+    if (pClient->m_uiClientID == uiSenderClientID)
+      continue;
+
+    plNetworkMessage received(const_cast<plUInt8*>(payload.GetPtr()), 0, payload.GetCount(), payload.GetCount(), 0);
+    plNetworkMessage relay = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(relay, m_uiServerClientID, pComponent->GetNetID());
+    pComponent->NetworkRelayForClient(received, relay, pClient->m_uiClientID);
+    relay.SetChannelType(pComponent->GetChannelType());
+    m_BandwidthManager.RecordBytesSent(relay.m_uiLength);
+    m_pPeer->SendTo(relay, pClient->m_Connection).IgnoreResult();
+  }
+}
+
+void plNetworkWorldModule::HoldMessage(HeldMessage::Kind kind, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> data)
+{
+  if (m_uiHeldBytes + data.GetCount() > MaxHeldBytes)
+  {
+    plLog::Warning("PL Net: Dropping a message for component {}: {} bytes are already waiting for components to start", uiComponentNetID, m_uiHeldBytes);
+    return;
+  }
+
+  HeldMessage& held = m_HeldMessages[uiComponentNetID].ExpandAndGetRef();
+  held.m_Kind = kind;
+  held.m_uiSender = uiSenderClientID;
+  held.m_Received = plNetworkClock::Now();
+  held.m_Data = data;
+  m_uiHeldBytes += data.GetCount();
+
+  // The component may have started since the last update; its held messages are then due now.
+  if (FindNetworkComponent(uiComponentNetID) != nullptr && !m_HeldReady.Contains(uiComponentNetID))
+    m_HeldReady.PushBack(uiComponentNetID);
+}
+
+void plNetworkWorldModule::HoldStateForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> state)
+{
+  HoldMessage(HeldMessage::Kind::State, uiComponentNetID, uiSenderClientID, state);
+}
+
+void plNetworkWorldModule::HoldRpcForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> rpc)
+{
+  HoldMessage(HeldMessage::Kind::Rpc, uiComponentNetID, uiSenderClientID, rpc);
+}
+
+void plNetworkWorldModule::ReleaseHeldMessages()
+{
+  // Components that started since the last update get what arrived for them, in the order it arrived.
+  while (!m_HeldReady.IsEmpty() && !m_bStopRequested)
+  {
+    const plUInt32 uiComponentNetID = m_HeldReady[0];
+    m_HeldReady.RemoveAtAndCopy(0);
+
+    plDynamicArray<HeldMessage> held;
+    if (!m_HeldMessages.Remove(uiComponentNetID, &held))
+      continue;
+
+    plNetworkComponent* pComponent = FindNetworkComponent(uiComponentNetID);
+    for (HeldMessage& message : held)
+    {
+      m_uiHeldBytes -= message.m_Data.GetCount();
+      if (pComponent == nullptr || m_bStopRequested)
+        continue;
+
+      plNetworkMessage msg(message.m_Data.GetData(), 0, message.m_Data.GetCount(), message.m_Data.GetCount(), 0);
+      if (message.m_Kind == HeldMessage::Kind::Rpc)
+      {
+        m_RpcManager.HandleRpcMessage(msg, message.m_uiSender);
+      }
+      else if (ValidateStateUpdate(uiComponentNetID, message.m_uiSender))
+      {
+        pComponent->NetworkDeserialize(msg);
+      }
+    }
+  }
+
+  // Messages for a component that never started are dropped once they are old.
+  const plTime cutoff = plNetworkClock::Now() - GetMaxHoldTime();
+  for (auto it = m_HeldMessages.GetIterator(); it.IsValid();)
+  {
+    if (!it.Value().IsEmpty() && it.Value()[0].m_Received < cutoff)
+    {
+      for (const HeldMessage& message : it.Value())
+        m_uiHeldBytes -= message.m_Data.GetCount();
+
+      plLog::Dev("PL Net: Dropped {} messages for component {}, which did not start in time", it.Value().GetCount(), it.Key());
+      it = m_HeldMessages.Remove(it);
+    }
+    else
+    {
+      ++it;
+    }
+  }
+}
+
+bool plNetworkWorldModule::IsHoldingMessagesFor(plUInt32 uiComponentNetID) const
+{
+  return m_HeldMessages.Contains(uiComponentNetID);
+}
+
 bool plNetworkWorldModule::IsReplicationTick(plTime now)
 {
   const plTime elapsed = now - m_LastUpdate;
@@ -1089,15 +1130,9 @@ bool plNetworkWorldModule::IsReplicationTick(plTime now)
 
 bool plNetworkWorldModule::ShouldSendComponent(plNetworkComponent* pComponent) const
 {
-  const plNetworkRoleEnum::Enum role = pComponent->GetNetworkRole();
-
-  if (IsServer() || IsHost())
-    return role == plNetworkRoleEnum::Server || role == plNetworkRoleEnum::Host || role == plNetworkRoleEnum::Both;
-
-  if (IsClient())
-    return role == plNetworkRoleEnum::Client || role == plNetworkRoleEnum::Both;
-
-  return false;
+  // Whoever may write the state sends it: the server for its own state and for objects nobody owns, the owner for
+  // Client-role state, and that owner may be the host.
+  return HasLocalAuthority(pComponent);
 }
 
 plResult plNetworkWorldModule::SendComponentState(plNetworkComponent* pComponent)
@@ -1509,69 +1544,61 @@ bool plNetworkWorldModule::HasAuthority(plNetworkComponent* pComponent, plUInt32
   if (!pComponent)
     return false;
 
-  // Server always has authority on server-role components
-  if (uiClientID == m_uiServerClientID)
-  {
-    return pComponent->GetNetworkRole() == plNetworkRoleEnum::Server ||
-           pComponent->GetNetworkRole() == plNetworkRoleEnum::Host ||
-           pComponent->GetNetworkRole() == plNetworkRoleEnum::Both;
-  }
-
-  // Check component's network role
-  plNetworkRoleEnum::Enum role = pComponent->GetNetworkRole();
-
-  switch (role)
+  // Server and Host: only the server writes. Client: only the owner writes, and the server owns what no client owns, so a
+  // host's own objects are written by the host. Both: the server and the owner.
+  switch (pComponent->GetNetworkRole())
   {
     case plNetworkRoleEnum::Server:
     case plNetworkRoleEnum::Host:
-      // Only server can modify server-authoritative components
       return uiClientID == m_uiServerClientID;
 
     case plNetworkRoleEnum::Client:
-      // Check if this client owns this component via ObjectManager
-      {
-        const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
-        // Scene components without explicit ownership cannot grant remote write authority.
-        return pInfo != nullptr && pInfo->m_uiOwnerClientID == uiClientID;
-      }
+      return uiClientID == GetOwnerClientID(pComponent);
 
     case plNetworkRoleEnum::Both:
-      // Both server and owning client can modify
-      {
-        if (uiClientID == m_uiServerClientID)
-          return true;
-
-        const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
-        return pInfo != nullptr && pInfo->m_uiOwnerClientID == uiClientID;
-      }
+      return uiClientID == m_uiServerClientID || uiClientID == GetOwnerClientID(pComponent);
 
     default:
       return false;
   }
 }
 
+plUInt32 plNetworkWorldModule::GetOwnerClientID(const plNetworkComponent* pComponent) const
+{
+  const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
+  return pInfo != nullptr ? pInfo->m_uiOwnerClientID : m_uiServerClientID;
+}
+
 bool plNetworkWorldModule::HasLocalAuthority(plNetworkComponent* pComponent) const
 {
+  // A client in its handshake has no client ID yet; its placeholder 0 is the server's.
+  if (IsClient() && !IsConnected())
+    return false;
+
   return HasAuthority(pComponent, m_uiLocalClientID);
 }
 
 plNetworkComponent* plNetworkWorldModule::FindNetworkComponent(plUInt32 uiComponentNetID) const
 {
   plNetworkComponent* pResult = nullptr;
-  for (plNetworkComponent* pComponent : m_NetworkComponents)
-  {
-    if (pComponent->GetNetID() != uiComponentNetID)
-      continue;
-    if (pResult != nullptr)
-      return nullptr; // Ambiguous identities must fail closed.
-    pResult = pComponent;
-  }
+  m_ComponentsByNetID.TryGetValue(uiComponentNetID, pResult);
   return pResult;
 }
 
 const plNetworkObjectInfo* plNetworkWorldModule::FindOwningObject(const plNetworkComponent* pComponent) const
 {
-  for (const plGameObject* pObject = pComponent ? pComponent->GetOwner() : nullptr; pObject; pObject = pObject->GetParent())
+  if (pComponent == nullptr)
+    return nullptr;
+
+  // A spawned component names its object in its NetID.
+  if (const plUInt32 uiObjectID = plNetworkObjectManager::GetObjectNetID(pComponent->GetNetID()))
+  {
+    if (const plNetworkObjectInfo* pInfo = m_ObjectManager.GetObjectInfo(uiObjectID))
+      return pInfo;
+  }
+
+  // A scene object can be given an owner as a whole, which its children share.
+  for (const plGameObject* pObject = pComponent->GetOwner(); pObject; pObject = pObject->GetParent())
   {
     const plUInt32 uiObjectID = m_ObjectManager.GetNetworkID(pObject->GetHandle());
     if (uiObjectID != 0)
@@ -1662,14 +1689,13 @@ void plNetworkWorldModule::SyncComponentStatesToClient(plNetworkClient* pClient)
 
   for (plNetworkComponent* pComponent : m_NetworkComponents)
   {
-    // Only sync server-authoritative components
-    plNetworkRoleEnum::Enum role = pComponent->GetNetworkRole();
-    if (role == plNetworkRoleEnum::Server ||
-        role == plNetworkRoleEnum::Host ||
-        role == plNetworkRoleEnum::Both)
-    {
+    // Spawned components carry their state in the spawn message.
+    if (plNetworkObjectManager::GetObjectNetID(pComponent->GetNetID()) != 0)
+      continue;
+
+    // The server holds the latest state of every role, owner uploads included.
+    if (pComponent->GetNetworkRole() != plNetworkRoleEnum::Undefined)
       SyncComponentStateToClient(pComponent, pClient);
-    }
   }
 }
 

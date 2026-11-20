@@ -12,6 +12,7 @@
 class plNetworkWorldModule;
 class plNetworkPeer;
 class plGameObject;
+class plNetworkComponent;
 
 /// @brief Represents a network-spawned object with ownership and authority information
 struct PL_NETWORKPLUGIN_DLL plNetworkObjectInfo
@@ -127,8 +128,29 @@ public:
   /// @brief Get the network ID for a game object
   plUInt32 GetNetworkID(plGameObjectHandle hObject) const;
 
-  /// @brief Get pending spawn network ID (used during prefab instantiation)
-  plUInt32 GetPendingSpawnNetworkID() const { return m_uiPendingSpawnNetworkID; }
+  //////////////////////////////////////////////////////////////////////////
+  // Component identity
+  //
+  // A component of a spawned object has the NetID (object NetID << 8) | slot, where slot counts the network components
+  // of the instantiated prefab, depth first: the root's components, then each child's in child order. Both peers assign
+  // it right after instantiation, so it is known before the component starts. The object NetID stays readable from it.
+  // Scene components hash their path instead and have the top bit set.
+  //////////////////////////////////////////////////////////////////////////
+
+  static constexpr plUInt32 ComponentSlotBits = 8;
+  static constexpr plUInt32 MaxComponentSlots = 1u << ComponentSlotBits;
+  static constexpr plUInt32 MaxObjectNetID = (1u << (31 - ComponentSlotBits)) - 1;
+
+  static plUInt32 MakeComponentNetID(plUInt32 uiObjectNetID, plUInt32 uiSlot) { return (uiObjectNetID << ComponentSlotBits) | uiSlot; }
+
+  /// @brief The object a spawned component belongs to, or 0 for a scene component.
+  static plUInt32 GetObjectNetID(plUInt32 uiComponentNetID)
+  {
+    return (uiComponentNetID & 0x80000000u) != 0 ? 0 : uiComponentNetID >> ComponentSlotBits;
+  }
+
+  /// @brief The network components of a spawned object in slot order.
+  static void GetSpawnedComponents(plGameObject* pRoot, plDynamicArray<plNetworkComponent*>& out_components);
 
   /// @brief Get the game object for a network ID
   plGameObjectHandle GetGameObject(plUInt32 uiNetworkID) const;
@@ -160,17 +182,18 @@ private:
   /// @brief Send spawn message to all clients
   void BroadcastSpawn(const plNetworkObjectInfo& info, const plTransform& transform);
 
-  /// @brief Send spawn message to specific client
+  /// @brief Send spawn message to specific client. It carries the initial state of every network component; a state
+  /// that does not fit follows as its own message.
   void SendSpawnToClient(const plNetworkObjectInfo& info, const plTransform& transform, plUInt32 uiClientID);
+
+  /// @brief Gives the components of a freshly instantiated object their NetIDs.
+  void AssignComponentNetIDs(plGameObject* pRoot, plUInt32 uiObjectNetID);
 
   /// @brief Send despawn message to all clients
   void BroadcastDespawn(plUInt32 uiNetworkID);
 
   /// @brief Internal spawn implementation
   plGameObject* SpawnPrefabInternal(const plHashedString& sPrefabGuid, const plTransform& transform, plGameObjectHandle hParent);
-
-  /// @brief Update network component IDs after spawn
-  void UpdateComponentNetIDs(plGameObject* pObject, plUInt32 uiNetworkID);
 
   /// @brief Cleanup destroyed objects
   void CleanupDestroyedObjects();
@@ -192,7 +215,4 @@ private:
 
   /// @brief Counter for generating unique network IDs
   plUInt32 m_uiNextNetworkID = 1;
-
-  /// @brief Network ID being assigned during spawn (for component registration)
-  plUInt32 m_uiPendingSpawnNetworkID = 0;
 };

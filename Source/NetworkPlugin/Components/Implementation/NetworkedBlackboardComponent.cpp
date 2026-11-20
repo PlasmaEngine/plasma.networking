@@ -178,22 +178,6 @@ void plNetworkedBlackboardComponent::OnSimulationStarted()
 {
   plNetworkComponent::OnSimulationStarted();
 
-  // Network-spawned objects give every plNetworkComponent the same NetID (e.g. FirstPersonPlayer shares it).
-  // ObjectReplicate delivers to the first matching component only — use a derived ID for this component.
-  if (m_pNetworkModule)
-  {
-    const plUInt32 uiObjectNetID = m_pNetworkModule->GetObjectManager()->GetNetworkID(GetOwner()->GetHandle());
-    const plUInt32 uiRegisteredNetID = GetNetID();
-
-    if (uiObjectNetID != 0 && uiObjectNetID == uiRegisteredNetID)
-    {
-      m_uiOwnerObjectNetID = uiObjectNetID;
-      const plUInt32 uiComponentNetID = plHashingUtils::CombineHashValues32(
-        uiObjectNetID, plHashingUtils::StringHashTo32(plHashingUtils::StringHash(GetDynamicRTTI()->GetTypeName())));
-      SetNetID(uiComponentNetID);
-    }
-  }
-
   SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
 
   if (m_Authority == plNetworkBlackboardAuthority::ServerAuthoritative)

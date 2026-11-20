@@ -207,7 +207,25 @@ public:
   /// @brief Validate that an incoming state update is authorized
   bool ValidateStateUpdate(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID) const;
   plNetworkComponent* FindNetworkComponent(plUInt32 uiComponentNetID) const;
+
+  /// @brief The spawned object a component belongs to, or the owned scene object above it; null when nobody owns it.
   const plNetworkObjectInfo* FindOwningObject(const plNetworkComponent* pComponent) const;
+
+  /// @brief The client that owns the component's object; the server when nobody does.
+  plUInt32 GetOwnerClientID(const plNetworkComponent* pComponent) const;
+
+  //////////////////////////////////////////////////////////////////////////
+  // Messages for components that have not started
+  //////////////////////////////////////////////////////////////////////////
+
+  /// @brief Client side: keeps a state payload until the component with this NetID starts, then applies it.
+  void HoldStateForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> state);
+
+  /// @brief Client side: keeps an RPC (from its RPC ID on) until the component with this NetID starts, then runs it.
+  void HoldRpcForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> rpc);
+
+  /// @brief True while messages wait for this component; newer ones then wait behind them.
+  bool IsHoldingMessagesFor(plUInt32 uiComponentNetID) const;
 
   //////////////////////////////////////////////////////////////////////////
   // Late-Joiner Synchronization
@@ -269,6 +287,28 @@ private:
   void BroadcastNetworkStateChange();
   void BroadcastClientConnected(plNetworkClient* pClient);
   void BroadcastClientDisconnected(plNetworkClient* pClient);
+
+  struct HeldMessage
+  {
+    enum class Kind : plUInt8
+    {
+      State,
+      Rpc,
+    };
+
+    Kind m_Kind = Kind::State;
+    plUInt32 m_uiSender = 0;
+    plTime m_Received;
+    plDynamicArray<plUInt8> m_Data;
+  };
+
+  static constexpr plUInt32 MaxHeldBytes = 256 * 1024;
+  static plTime GetMaxHoldTime() { return plTime::MakeFromSeconds(10); }
+
+  void HandleReplicationMessage(plNetworkMessage& msg, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID);
+  void RelayComponentState(plNetworkComponent* pComponent, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> payload);
+  void HoldMessage(HeldMessage::Kind kind, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> data);
+  void ReleaseHeldMessages();
 
   bool IsReplicationTick(plTime now);
   bool ShouldSendComponent(plNetworkComponent* pComponent) const;
@@ -332,7 +372,12 @@ private:
   plUInt64 m_uiNextSessionToken = 1;           ///< Counter for session tokens
 
   plDynamicArray<plNetworkComponent*> m_NetworkComponents;
+  plHashTable<plUInt32, plNetworkComponent*> m_ComponentsByNetID;
   plDynamicArray<plNetworkObject*> m_NetworkObjects;
+
+  plHashTable<plUInt32, plDynamicArray<HeldMessage>> m_HeldMessages;
+  plDynamicArray<plUInt32> m_HeldReady; ///< Components that started and have held messages, in the order they started.
+  plUInt32 m_uiHeldBytes = 0;
 
   /// @brief Object manager for spawn/despawn
   plNetworkObjectManager m_ObjectManager;

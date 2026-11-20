@@ -44,6 +44,14 @@ public:
 
   virtual bool RequiresPerRecipientSerialization() const { return false; }
 
+  /// @brief Server side: writes what an owner sent (in_received, positioned at the payload) for another client. The
+  /// default forwards it unchanged; a component whose state is filtered per recipient drops what that client must not get.
+  virtual void NetworkRelayForClient(plNetworkMessage& in_received, plNetworkMessage& out_msg, plUInt32 uiRecipientClientID)
+  {
+    PL_IGNORE_UNUSED(uiRecipientClientID);
+    out_msg.WriteBytes(in_received.m_pBuffer + in_received.m_uiPosition, in_received.GetRemainingBytes());
+  }
+
   PL_NODISCARD PL_FORCE_INLINE bool NeedReplication() const { return m_bNeedReplication; }
   void MarkDirty() { m_bNeedReplication = true; }
   void ClearDirty() { m_bNeedReplication = false; }

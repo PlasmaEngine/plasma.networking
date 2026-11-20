@@ -159,6 +159,9 @@ void plNetworkLevelManager::HandleLevelLoadComplete(plUInt32 uiClientID, plUInt6
   m_PendingClients.Remove(uiClientID);
   m_LoadedClients.Insert(uiClientID);
 
+  // The client's level objects exist now; state sent while it loaded may have arrived before them.
+  m_pNetworkModule->SyncComponentStatesToClient(m_pNetworkModule->GetClient(uiClientID));
+
   if (m_State != plNetworkLevelState::Loading)
   {
     // Late ack after we already started - this is a late-joiner finishing load
