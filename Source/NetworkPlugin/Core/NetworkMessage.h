@@ -432,16 +432,16 @@ public:
     return ReadHalf();
   }
 
-  /// @brief Write a time value as milliseconds (32-bit)
+  /// @brief Write a time value in seconds as a double, which keeps absolute time stamps exact at any uptime.
   PL_FORCE_INLINE void WriteTime(plTime time)
   {
-    WriteFloat(static_cast<float>(time.GetSeconds()));
+    WriteDouble(time.GetSeconds());
   }
 
   /// @brief Read a time value
   PL_FORCE_INLINE plTime ReadTime()
   {
-    return plTime::MakeFromSeconds(ReadFloat());
+    return plTime::MakeFromSeconds(ReadDouble());
   }
 
 private:

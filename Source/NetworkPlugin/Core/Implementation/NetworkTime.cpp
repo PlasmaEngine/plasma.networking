@@ -131,7 +131,7 @@ void plNetworkTime::SendSyncRequest()
   msg.WriteDouble(now.GetSeconds());
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg);
+  pPeer->SendToServer(msg).IgnoreResult();
 
   m_PendingSyncRequestTime = now;
   m_bSyncPending = true;
@@ -177,7 +177,7 @@ void plNetworkTime::HandleTimeSyncRequest(plNetworkMessage& msg, plUInt32 uiClie
   response.WriteDouble(serverSendTime.GetSeconds());
 
   response.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(response, pClient->m_Connection);
+  m_pNetworkModule->SendToClient(response, uiClientID).IgnoreResult();
 }
 
 void plNetworkTime::HandleTimeSyncResponse(plNetworkMessage& msg)

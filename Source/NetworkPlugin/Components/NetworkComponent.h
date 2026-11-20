@@ -71,7 +71,8 @@ protected:
 
 private:
   plEnum<plNetworkRoleEnum> m_NetworkRole = plNetworkRoleEnum::Undefined;
-  plEnum<plNetworkChannelTypeEnum> m_ChannelType;
+  /// State is sent once per change and the dirty flag is cleared on send, so the default channel must not lose it.
+  plEnum<plNetworkChannelTypeEnum> m_ChannelType = plNetworkChannelTypeEnum::ReliableOrdered;
   bool m_bNeedReplication = false;
   plUInt32 m_uiNetID = 0;
 };

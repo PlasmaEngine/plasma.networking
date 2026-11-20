@@ -163,6 +163,11 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
   // the world module's event pump for the rest of the frame.
   while (true)
   {
+    // ENet has already acknowledged a received packet; with no buffer to copy it into it stays queued in ENet until the
+    // next update instead of being dropped.
+    if (m_pNetworkPeer != nullptr && !m_pNetworkPeer->HasFreeMessage())
+      return PL_FAILURE;
+
     ENetEvent enetEvent;
     const int result = enet_host_service(m_pEnetHost, &enetEvent, 0);
 
@@ -240,7 +245,8 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
         event.m_Message = m_pNetworkPeer->CreateMessage();
         if (!event.m_Message.IsValid())
         {
-          plLog::Error("ENet: Failed to create message buffer - pool may be exhausted");
+          // Checked before servicing, so this is a pool the caller emptied in between.
+          plLog::Error("ENet: No message buffer for a received packet of {} bytes", enetEvent.packet->dataLength);
           enet_packet_destroy(enetEvent.packet);
           continue;
         }

@@ -58,8 +58,8 @@ public:
   /// On client: returns estimated server time
   plTime GetNetworkTime() const;
 
-  /// @brief Get network time as float seconds (convenience)
-  float GetNetworkTimeSeconds() const { return static_cast<float>(GetNetworkTime().GetSeconds()); }
+  /// @brief Get network time in seconds. A double: a float holds an absolute time to only 15.6 ms after 1.5 days.
+  double GetNetworkTimeSeconds() const { return GetNetworkTime().GetSeconds(); }
 
   /// @brief Get the local time offset from server
   /// Positive = local clock is ahead of server

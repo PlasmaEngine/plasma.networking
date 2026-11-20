@@ -311,11 +311,12 @@ void plNetworkedPropertiesComponent::Update()
     return;
   }
 
+  // Polls on a fixed step, so the poll and the network tick at the same rate do not drift apart and skip every other tick.
   const plTime now = plNetworkClock::Now();
   const plTime interval = plTime::MakeFromSeconds(m_fSendRate > 0.0f ? 1.0 / m_fSendRate : 0.05);
   if (now - m_LastPollTime < interval)
     return;
-  m_LastPollTime = now;
+  m_LastPollTime = plMath::Max(m_LastPollTime + interval, now - interval);
 
   bool bNeedsReplication = m_bThrottledChangePending;
   m_bThrottledChangePending = false;
@@ -431,8 +432,9 @@ void plNetworkedPropertiesComponent::NetworkSerializeForClient(plNetworkMessage&
 
     // The world module clears the dirty flag after this call, so a change held back by the send rate must ask Update to
     // mark the component dirty again, or it is never sent.
+    // A quarter interval of slack: a send that comes a little early because ticks and frames do not line up still goes out.
     if (!bInitialSync && lastSentTimes[i].GetSeconds() > 0.0 &&
-        now - lastSentTimes[i] < plTime::MakeFromSeconds(1.0 / plMath::Max(settings.m_fSendRate, 0.1f)))
+        now - lastSentTimes[i] < plTime::MakeFromSeconds(0.75 / plMath::Max(settings.m_fSendRate, 0.1f)))
     {
       m_bThrottledChangePending = true;
       continue;

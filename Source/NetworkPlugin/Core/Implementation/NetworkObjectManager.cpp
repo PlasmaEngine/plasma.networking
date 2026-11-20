@@ -27,8 +27,7 @@ void plNetworkObjectManager::Initialize(plNetworkWorldModule* pNetworkModule)
 }
 
 void plNetworkObjectManager::Shutdown()
-{
-  // Clear all tracked objects (don't destroy them, let world handle that)
+{  // Clear all tracked objects (don't destroy them, let world handle that)
   m_NetworkObjects.Clear();
   m_ObjectToNetworkID.Clear();
   m_pNetworkModule = nullptr;
@@ -306,8 +305,8 @@ bool plNetworkObjectManager::TransferOwnership(plUInt32 uiNetworkID, plUInt32 ui
   plUInt32 oldOwner = pInfo->m_uiOwnerClientID;
   pInfo->m_uiOwnerClientID = uiNewOwnerClientID;
 
-  // Broadcast ownership change
-  if (m_pNetworkModule && m_pNetworkModule->GetPeer())
+  // Every admitted client learns the new owner.
+  if (m_pNetworkModule && m_pNetworkModule->GetPeer() && !m_pNetworkModule->IsClient())
   {
     plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
     plNetworkMessage msg = pPeer->BeginSendMessage();
@@ -318,7 +317,7 @@ bool plNetworkObjectManager::TransferOwnership(plUInt32 uiNetworkID, plUInt32 ui
     msg.WriteUInt8(static_cast<plUInt8>(pInfo->m_Authority.GetValue()));
 
     msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-    pPeer->SendMessages(msg);
+    m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
   }
 
   plLog::Dev("PL Net: Transferred ownership of object {} from {} to {}",
@@ -424,20 +423,6 @@ void plNetworkObjectManager::BroadcastSpawn(const plNetworkObjectInfo& info, con
     return;
 
   plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
-
-  // Get all connected clients
-  plDynamicArray<plNetworkConnection> targets;
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
-  }
-
-  if (targets.IsEmpty())
-    return;
-
   plNetworkMessage msg = pPeer->BeginSendMessage();
 
   msg.WriteUInt8(plNetworkMessageIDs::ObjectSpawn);
@@ -456,7 +441,7 @@ void plNetworkObjectManager::BroadcastSpawn(const plNetworkObjectInfo& info, con
   msg.WriteVec3(transform.m_vScale);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg, targets);
+  m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
 }
 
 void plNetworkObjectManager::SendSpawnToClient(const plNetworkObjectInfo& info, const plTransform& transform, plUInt32 uiClientID)
@@ -485,7 +470,7 @@ void plNetworkObjectManager::SendSpawnToClient(const plNetworkObjectInfo& info, 
   msg.WriteVec3(transform.m_vScale);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg, pClient->m_Connection);
+  m_pNetworkModule->SendToClient(msg, uiClientID).IgnoreResult();
 }
 
 void plNetworkObjectManager::BroadcastDespawn(plUInt32 uiNetworkID)
@@ -494,26 +479,13 @@ void plNetworkObjectManager::BroadcastDespawn(plUInt32 uiNetworkID)
     return;
 
   plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
-
-  plDynamicArray<plNetworkConnection> targets;
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
-  }
-
-  if (targets.IsEmpty())
-    return;
-
   plNetworkMessage msg = pPeer->BeginSendMessage();
 
   msg.WriteUInt8(plNetworkMessageIDs::ObjectDespawn);
   msg.WriteUInt32(uiNetworkID);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg, targets);
+  m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
 }
 
 void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)

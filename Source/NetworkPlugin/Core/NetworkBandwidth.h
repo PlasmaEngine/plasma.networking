@@ -47,11 +47,13 @@ struct PL_NETWORKPLUGIN_DLL plNetworkBandwidthConfig
   /// @brief Minimum update interval for low-priority components (seconds)
   float m_fMinUpdateIntervalLow = 0.5f;
 
-  /// @brief Minimum update interval for normal-priority components (seconds)
-  float m_fMinUpdateIntervalNormal = 0.1f;
+  /// @brief Minimum update interval for normal-priority components (seconds). Normal is the default priority, so it adds
+  /// no limit: the component's own send rate and the network tick decide.
+  float m_fMinUpdateIntervalNormal = 0.0f;
 
-  /// @brief Minimum update interval for high-priority components (seconds)
-  float m_fMinUpdateIntervalHigh = 0.033f;
+  /// @brief Minimum update interval for high-priority components (seconds). A higher priority never sends less often than
+  /// Normal.
+  float m_fMinUpdateIntervalHigh = 0.0f;
 
   /// @brief Distance threshold for position delta (below this, don't send)
   float m_fPositionDeltaThreshold = 0.01f;

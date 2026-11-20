@@ -295,7 +295,7 @@ bool plNetworkRpcManager::CallRpc(
       else
       {
         // Send to server
-        pPeer->SendMessages(msg);
+        pPeer->SendToServer(msg).IgnoreResult();
       }
       break;
     }
@@ -331,7 +331,7 @@ bool plNetworkRpcManager::CallRpc(
         plNetworkClient* pOwnerClient = m_pNetworkModule->GetClient(ownerClientID);
         if (pOwnerClient)
         {
-          pPeer->SendMessages(msg, pOwnerClient->m_Connection);
+          pPeer->SendTo(msg, pOwnerClient->m_Connection).IgnoreResult();
         }
       }
       break;
@@ -352,13 +352,13 @@ bool plNetworkRpcManager::CallRpc(
         }
         if (!targets.IsEmpty())
         {
-          pPeer->SendMessages(msg, targets);
+          pPeer->SendTo(msg, targets.GetArrayPtr()).IgnoreResult();
         }
       }
       else
       {
         // Client needs to ask server to broadcast
-        pPeer->SendMessages(msg);
+        pPeer->SendToServer(msg).IgnoreResult();
       }
       break;
     }
@@ -387,13 +387,13 @@ bool plNetworkRpcManager::CallRpc(
         }
         if (!targets.IsEmpty())
         {
-          pPeer->SendMessages(msg, targets);
+          pPeer->SendTo(msg, targets.GetArrayPtr()).IgnoreResult();
         }
       }
       else
       {
         // Send to server for relay
-        pPeer->SendMessages(msg);
+        pPeer->SendToServer(msg).IgnoreResult();
       }
       break;
     }
@@ -414,7 +414,7 @@ bool plNetworkRpcManager::CallRpc(
         }
         if (!targets.IsEmpty())
         {
-          pPeer->SendMessages(msg, targets);
+          pPeer->SendTo(msg, targets.GetArrayPtr()).IgnoreResult();
         }
       }
       break;
@@ -505,7 +505,7 @@ bool plNetworkRpcManager::CallRpc(
       else
       {
         // Send to server
-        pPeer->SendMessages(msg);
+        pPeer->SendToServer(msg).IgnoreResult();
       }
       break;
     }
@@ -552,13 +552,13 @@ bool plNetworkRpcManager::CallRpc(
         }
         if (!targets.IsEmpty())
         {
-          pPeer->SendMessages(msg, targets);
+          pPeer->SendTo(msg, targets.GetArrayPtr()).IgnoreResult();
         }
       }
       else
       {
         // Client needs to ask server to broadcast
-        pPeer->SendMessages(msg);
+        pPeer->SendToServer(msg).IgnoreResult();
       }
       break;
     }
@@ -680,7 +680,7 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
         }
         
         if (!targets.IsEmpty())
-          pPeer->SendMessages(relayMsg, targets);
+          pPeer->SendTo(relayMsg, targets.GetArrayPtr()).IgnoreResult();
         else
           pPeer->CancelSendMessage(relayMsg);
       }

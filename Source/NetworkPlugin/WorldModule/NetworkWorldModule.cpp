@@ -529,7 +529,6 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
   });
   float dt = GetWorld()->GetClock().GetTimeDiff().AsFloatInSeconds();
   plTime timeNow = plNetworkClock::Now();
-  float minDelta = m_fNetworkTickRate > 0 ? 1.0f / m_fNetworkTickRate : 0.0f;
 
   // Always update bandwidth manager for debug visualization (even when not connected)
   m_BandwidthManager.Update(dt);
@@ -614,7 +613,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
 
           msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
           m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-          m_pPeer->SendMessages(msg);
+          m_pPeer->SendToServer(msg).IgnoreResult();
         }
         else
         {
@@ -836,7 +835,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
                     pReplicatedComponent->NetworkSerializeForClient(relayMsg, pTargetClient->m_uiClientID, false);
                     relayMsg.SetChannelType(pReplicatedComponent->GetChannelType());
                     m_BandwidthManager.RecordBytesSent(relayMsg.m_uiLength);
-                    m_pPeer->SendMessages(relayMsg, pTargetClient->m_Connection);
+                    m_pPeer->SendTo(relayMsg, pTargetClient->m_Connection).IgnoreResult();
                   }
                 }
                 else
@@ -846,7 +845,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
                   pReplicatedComponent->NetworkSerialize(relayMsg);
                   relayMsg.SetChannelType(pReplicatedComponent->GetChannelType());
                   m_BandwidthManager.RecordBytesSent(relayMsg.m_uiLength * connections.GetCount());
-                  m_pPeer->SendMessages(relayMsg, connections);
+                  m_pPeer->SendTo(relayMsg, connections.GetArrayPtr()).IgnoreResult();
                 }
               }
             }
@@ -907,7 +906,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
                 response.WriteUInt8(1); // Success
                 response.WriteUInt32(pReconnectClient->m_uiClientID);
                 response.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-                m_pPeer->SendMessages(response, event.m_Sender);
+                m_pPeer->SendTo(response, event.m_Sender).IgnoreResult();
                 
                 // Sync state to reconnected client
                 SyncComponentStatesToClient(pReconnectClient);
@@ -922,7 +921,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
                 response.WriteUInt8(0); // Failure
                 response.WriteUInt32(0); // No client ID
                 response.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-                m_pPeer->SendMessages(response, event.m_Sender);
+                m_pPeer->SendTo(response, event.m_Sender).IgnoreResult();
               }
             }
             break;
@@ -1047,99 +1046,15 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
     return;
 
   // Dirty replication is gated by network tick rate; transport pump runs every frame.
-  const bool bReplicationTick = m_fNetworkTickRate <= 0.0f ||
-    (timeNow.AsFloatInSeconds() - m_LastUpdate.AsFloatInSeconds() >= minDelta);
-
-  if (bReplicationTick)
+  if (IsReplicationTick(timeNow))
   {
-    m_LastUpdate = timeNow;
-
     if (IsServer() || IsHost())
     {
       RecordLagCompensationSnapshots();
     }
 
-  for (plNetworkComponent* pComponent : m_NetworkComponents)
-  {
-    if (pComponent->NeedReplication())
-    {
-      // Determine if we should send based on our role and the component's network role
-      bool bShouldSend = false;
-      plNetworkRoleEnum::Enum compRole = pComponent->GetNetworkRole();
-      
-      if (IsServer() || IsHost())
-      {
-        // Server/Host sends for Server, Host, or Both roles
-        bShouldSend = (compRole == plNetworkRoleEnum::Server || 
-                       compRole == plNetworkRoleEnum::Host || 
-                       compRole == plNetworkRoleEnum::Both);
-      }
-      else if (IsClient())
-      {
-        // Client sends for Client or Both roles
-        bShouldSend = (compRole == plNetworkRoleEnum::Client || 
-                       compRole == plNetworkRoleEnum::Both);
-      }
-      
-      if (!bShouldSend)
-      {
-        continue;
-      }
-
-      // Check if bandwidth manager allows this update
-      if (!m_BandwidthManager.ShouldSendUpdate(pComponent->GetNetID()))
-      {
-        continue; // Skip this update, will try again next tick
-      }
-
-      if (IsClient())
-      {
-        plNetworkMessage msg = m_pPeer->BeginSendMessage();
-        WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
-        pComponent->NetworkSerializeForClient(msg, m_uiServerClientID, false);
-        msg.SetChannelType(pComponent->GetChannelType());
-        m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-        m_pPeer->SendMessages(msg);
-      }
-      else
-      {
-        if (pComponent->RequiresPerRecipientSerialization())
-        {
-          for (plNetworkClient* pTargetClient : m_pClients)
-          {
-            if (!pTargetClient || pTargetClient->m_ConnectionState != plNetworkConnectionState::Connected)
-              continue;
-
-            plNetworkMessage msg = m_pPeer->BeginSendMessage();
-            WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
-            pComponent->NetworkSerializeForClient(msg, pTargetClient->m_uiClientID, false);
-            msg.SetChannelType(pComponent->GetChannelType());
-            m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-            m_pPeer->SendMessages(msg, pTargetClient->m_Connection);
-          }
-        }
-        else
-        {
-          plDynamicArray<plNetworkConnection> connections;
-          GetTargets(connections);
-          if (connections.GetCount() > 0)
-          {
-            plNetworkMessage msg = m_pPeer->BeginSendMessage();
-            WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
-            pComponent->NetworkSerialize(msg);
-            msg.SetChannelType(pComponent->GetChannelType());
-            m_BandwidthManager.RecordBytesSent(msg.m_uiLength * connections.GetCount());
-            m_pPeer->SendMessages(msg, connections);
-          }
-        }
-      }
-      
-      // Clear the dirty flag after successfully sending
-      pComponent->ClearDirty();
-      m_BandwidthManager.MarkUpdateSent(pComponent->GetNetID());
-    }
+    ReplicateDirtyComponents();
   }
-  } // bReplicationTick
 
   // Check for inactive client timeouts (server only)
   if (IsServer() || IsHost())
@@ -1152,6 +1067,95 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
 
   // Draw debug HUD (gated internally by the Networking.DrawInfo CVar)
   LogInfo();
+}
+
+bool plNetworkWorldModule::IsReplicationTick(plTime now)
+{
+  const plTime elapsed = now - m_LastUpdate;
+  m_LastUpdate = now;
+
+  if (m_fNetworkTickRate <= 0.0f)
+    return true;
+
+  // A fixed-step accumulator in plTime: the rate holds at any uptime, and a slow frame catches up one tick at most.
+  const plTime step = plTime::MakeFromSeconds(1.0 / m_fNetworkTickRate);
+  m_ReplicationAccumulator = plMath::Min(m_ReplicationAccumulator + elapsed, step * 2.0);
+  if (m_ReplicationAccumulator < step)
+    return false;
+
+  m_ReplicationAccumulator -= step;
+  return true;
+}
+
+bool plNetworkWorldModule::ShouldSendComponent(plNetworkComponent* pComponent) const
+{
+  const plNetworkRoleEnum::Enum role = pComponent->GetNetworkRole();
+
+  if (IsServer() || IsHost())
+    return role == plNetworkRoleEnum::Server || role == plNetworkRoleEnum::Host || role == plNetworkRoleEnum::Both;
+
+  if (IsClient())
+    return role == plNetworkRoleEnum::Client || role == plNetworkRoleEnum::Both;
+
+  return false;
+}
+
+plResult plNetworkWorldModule::SendComponentState(plNetworkComponent* pComponent)
+{
+  if (IsClient())
+  {
+    plNetworkMessage msg = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
+    pComponent->NetworkSerializeForClient(msg, m_uiServerClientID, false);
+    msg.SetChannelType(pComponent->GetChannelType());
+    m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
+    return m_pPeer->SendToServer(msg);
+  }
+
+  if (!pComponent->RequiresPerRecipientSerialization())
+  {
+    plNetworkMessage msg = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
+    pComponent->NetworkSerialize(msg);
+    msg.SetChannelType(pComponent->GetChannelType());
+    return SendToConnectedClients(msg);
+  }
+
+  plResult result = PL_SUCCESS;
+  plHybridArray<plNetworkClient*, 32> clients;
+  GetConnectedClients(clients);
+  for (plNetworkClient* pTargetClient : clients)
+  {
+    plNetworkMessage msg = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
+    pComponent->NetworkSerializeForClient(msg, pTargetClient->m_uiClientID, false);
+    msg.SetChannelType(pComponent->GetChannelType());
+    m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
+    if (m_pPeer->SendTo(msg, pTargetClient->m_Connection).Failed())
+      result = PL_FAILURE;
+  }
+
+  return result;
+}
+
+void plNetworkWorldModule::ReplicateDirtyComponents()
+{
+  for (plNetworkComponent* pComponent : m_NetworkComponents)
+  {
+    if (!pComponent->NeedReplication() || !ShouldSendComponent(pComponent))
+      continue;
+
+    // A priority interval that has not passed yet keeps the component dirty for a later tick.
+    if (!m_BandwidthManager.ShouldSendUpdate(pComponent->GetNetID()))
+      continue;
+
+    // A state that could not be sent (it does not fit one message) stays dirty instead of being lost.
+    if (SendComponentState(pComponent).Failed())
+      continue;
+
+    pComponent->ClearDirty();
+    m_BandwidthManager.MarkUpdateSent(pComponent->GetNetID());
+  }
 }
 
 void plNetworkWorldModule::BroadcastNetworkStateChange()
@@ -1276,7 +1280,7 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
   msgReply.WriteUInt32(replyMessage.m_uiClientID);
   msgReply.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_BandwidthManager.RecordBytesSent(msgReply.m_uiLength);
-  m_pPeer->SendMessages(msgReply, event.m_Sender);
+  m_pPeer->SendTo(msgReply, event.m_Sender).IgnoreResult();
 
   if (!replyMessage.m_bSuccess)
   {
@@ -1354,15 +1358,48 @@ void plNetworkWorldModule::HandleHandshakeReply(plNetworkEvent& event, plNetwork
   BroadcastNetworkStateChange();
 }
 
-void plNetworkWorldModule::GetTargets(plDynamicArray<plNetworkConnection>& targets)
+void plNetworkWorldModule::GetConnectedClients(plDynamicArray<plNetworkClient*>& out_clients) const
 {
+  out_clients.Clear();
   for (plNetworkClient* pClient : m_pClients)
   {
-    if (pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
+    if (pClient != nullptr && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
+      out_clients.PushBack(pClient);
   }
+}
+
+void plNetworkWorldModule::GetConnectedTargets(plDynamicArray<plNetworkConnection>& out_targets, plUInt32 uiExcludeClientID) const
+{
+  out_targets.Clear();
+  for (plNetworkClient* pClient : m_pClients)
+  {
+    if (pClient != nullptr && pClient->m_ConnectionState == plNetworkConnectionState::Connected && pClient->m_uiClientID != uiExcludeClientID)
+      out_targets.PushBack(pClient->m_Connection);
+  }
+}
+
+plResult plNetworkWorldModule::SendToConnectedClients(const plNetworkMessage& msg, plUInt32 uiExcludeClientID)
+{
+  if (!m_pPeer || IsClient())
+    return PL_FAILURE;
+
+  plHybridArray<plNetworkConnection, 32> targets;
+  GetConnectedTargets(targets, uiExcludeClientID);
+  m_BandwidthManager.RecordBytesSent(msg.m_uiLength * targets.GetCount());
+  return m_pPeer->SendTo(msg, targets.GetArrayPtr());
+}
+
+plResult plNetworkWorldModule::SendToClient(const plNetworkMessage& msg, plUInt32 uiClientID)
+{
+  if (!m_pPeer || IsClient())
+    return PL_FAILURE;
+
+  plNetworkClient* pClient = GetClient(uiClientID);
+  if (pClient == nullptr || pClient->m_ConnectionState != plNetworkConnectionState::Connected)
+    return PL_FAILURE;
+
+  m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
+  return m_pPeer->SendTo(msg, pClient->m_Connection);
 }
 
 
@@ -1648,8 +1685,7 @@ void plNetworkWorldModule::SyncComponentStateToClient(plNetworkComponent* pCompo
   pComponent->NetworkSerializeForClient(msg, pClient->m_uiClientID, true);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-  m_pPeer->SendMessages(msg, pClient->m_Connection);
+  SendToClient(msg, pClient->m_uiClientID).IgnoreResult();
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1667,7 +1703,7 @@ void plNetworkWorldModule::SendDisconnect(plNetworkDisconnectReason::Enum reason
   msg.WriteUInt8(static_cast<plUInt8>(reason));
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-  m_pPeer->SendMessages(msg);
+  m_pPeer->SendToServer(msg).IgnoreResult();
 
   plLog::Dev("PL Net: Sent disconnect (reason: {})", static_cast<plUInt8>(reason));
 }
@@ -1677,19 +1713,12 @@ void plNetworkWorldModule::BroadcastDisconnect(plNetworkDisconnectReason::Enum r
   if (!m_pPeer || (!IsHost() && !IsServer()))
     return;
 
-  for (plNetworkClient* pClient : m_pClients)
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      plNetworkMessage msg = m_pPeer->BeginSendMessage();
-      msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::Disconnect));
-      msg.WriteUInt32(m_uiServerClientID);
-      msg.WriteUInt8(static_cast<plUInt8>(reason));
-      msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-      m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-      m_pPeer->SendMessages(msg, pClient->m_Connection);
-    }
-  }
+  plNetworkMessage msg = m_pPeer->BeginSendMessage();
+  msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::Disconnect));
+  msg.WriteUInt32(m_uiServerClientID);
+  msg.WriteUInt8(static_cast<plUInt8>(reason));
+  msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
+  SendToConnectedClients(msg).IgnoreResult();
 
   plLog::Dev("PL Net: Broadcast disconnect to all clients (reason: {})", static_cast<plUInt8>(reason));
 }
@@ -1716,12 +1745,11 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
   msg.WriteUInt8(static_cast<plUInt8>(reason));
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-  m_pPeer->SendMessages(msg, pClient->m_Connection);
+  m_pPeer->SendTo(msg, pClient->m_Connection).IgnoreResult();
 
-  // Flush the reason if possible, then close immediately. Admission state is revoked before
+  // Disconnect sends what is queued, the reason included, before it closes. Admission state is revoked before
   // any subsequent event; the record is reclaimed after dispatch, not while it is in use.
   pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-  m_pPeer->Update(0.0f);
   m_pPeer->Disconnect(pClient->m_Connection);
   pClient->m_bReservedForReconnect = false;
 }
@@ -1732,8 +1760,9 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
 
 bool plNetworkWorldModule::CheckRateLimit(plNetworkClient* pClient)
 {
-  if (!pClient || m_uiRateLimitPerSecond == 0)
-    return true; // No rate limiting
+  // The limit protects a server from its clients; a client takes whatever its server sends.
+  if (!pClient || m_uiRateLimitPerSecond == 0 || IsClient())
+    return true;
 
   // Reset counter each second
   plTime now = plNetworkClock::Now();

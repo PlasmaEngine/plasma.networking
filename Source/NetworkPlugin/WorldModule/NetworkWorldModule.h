@@ -126,6 +126,19 @@ public:
   plNetworkClient* GetClient(plUInt32 uiClientID);
   plNetworkClient* GetClient(const plNetworkConnection& connection);
 
+  /// @brief The clients that completed the handshake. Every message a server sends goes to these only; a client still
+  /// in admission would take any other message as a protocol violation.
+  void GetConnectedClients(plDynamicArray<plNetworkClient*>& out_clients) const;
+
+  /// @brief Connections of the admitted clients, without uiExcludeClientID.
+  void GetConnectedTargets(plDynamicArray<plNetworkConnection>& out_targets, plUInt32 uiExcludeClientID = plInvalidIndex) const;
+
+  /// @brief Server side: sends to every admitted client except uiExcludeClientID.
+  plResult SendToConnectedClients(const plNetworkMessage& msg, plUInt32 uiExcludeClientID = plInvalidIndex);
+
+  /// @brief Server side: sends to one client if it is admitted.
+  plResult SendToClient(const plNetworkMessage& msg, plUInt32 uiClientID);
+
   bool StartServer();
   bool StartClient();
   bool StartHost();
@@ -257,10 +270,14 @@ private:
   void BroadcastClientConnected(plNetworkClient* pClient);
   void BroadcastClientDisconnected(plNetworkClient* pClient);
 
+  bool IsReplicationTick(plTime now);
+  bool ShouldSendComponent(plNetworkComponent* pComponent) const;
+  plResult SendComponentState(plNetworkComponent* pComponent);
+  void ReplicateDirtyComponents();
+
   void HandleHandshake(plNetworkEvent& event, plNetworkClient* pClient);
   void HandleHandshakeReply(plNetworkEvent& event, plNetworkClient* pClient);
 
-  void GetTargets(plDynamicArray<plNetworkConnection>& targets);
 
   bool StartPeer();
   void StopPeer();
@@ -302,6 +319,7 @@ private:
   plNetworkClient* m_pLocalClient = nullptr;
   plDynamicArray<plNetworkClient*> m_pClients;
   plTime m_LastUpdate;
+  plTime m_ReplicationAccumulator;
   plUInt32 m_uiGameVersion = 0;
 
   /// @brief Rate limiting configuration

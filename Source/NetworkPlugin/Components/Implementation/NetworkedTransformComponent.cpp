@@ -252,7 +252,7 @@ void plNetworkedTransformComponent::SendStateToHost()
 
   msg.SetChannelType(plNetworkChannelTypeEnum::UnreliableOrdered);
   msg.SetPriority(plNetworkPriority::High);
-  m_pNetworkModule->GetPeer()->SendMessages(msg);
+  m_pNetworkModule->GetPeer()->SendToServer(msg).IgnoreResult();
 }
 
 void plNetworkedTransformComponent::BroadcastStateToClients(bool bIncludeOwner)
@@ -260,33 +260,19 @@ void plNetworkedTransformComponent::BroadcastStateToClients(bool bIncludeOwner)
   if (!m_pNetworkModule || !m_pNetworkModule->GetPeer())
     return;
 
-  plUInt32 uiOwnerClientID = 0;
-  if (const plNetworkObjectInfo* pInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(GetNetID()))
+  plUInt32 uiExcludeClientID = plInvalidIndex;
+  if (!bIncludeOwner)
   {
-    uiOwnerClientID = pInfo->m_uiOwnerClientID;
+    if (const plNetworkObjectInfo* pInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(GetNetID()))
+      uiExcludeClientID = pInfo->m_uiOwnerClientID;
   }
-
-  auto& clients = m_pNetworkModule->GetClients();
-  plDynamicArray<plNetworkConnection> connections;
-  for (auto* pClient : clients)
-  {
-    if (pClient->m_uiClientID == m_pNetworkModule->GetLocalClientID())
-      continue;
-
-    if (!bIncludeOwner && pClient->m_uiClientID == uiOwnerClientID)
-      continue;
-
-    connections.PushBack(pClient->m_Connection);
-  }
-  if (connections.IsEmpty())
-    return;
 
   plNetworkMessage msg = m_pNetworkModule->GetPeer()->BeginSendMessage();
   WriteTransformState(msg);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::UnreliableOrdered);
   msg.SetPriority(plNetworkPriority::High);
-  m_pNetworkModule->GetPeer()->SendMessages(msg, connections);
+  m_pNetworkModule->SendToConnectedClients(msg, uiExcludeClientID).IgnoreResult();
 }
 
 void plNetworkedTransformComponent::HandleTransformStateMessage(plNetworkMessage& msg)

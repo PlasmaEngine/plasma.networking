@@ -109,14 +109,8 @@ void plNetworkPeer::Shutdown()
   if (!m_pDriver)
     return;
 
-  // Messages a host queued during the last update, such as the disconnect it broadcasts when it stops, still go out.
-  // A client has already dropped its connection by now (the driver's Disconnect tells the host), so its queue is
-  // discarded.
-  if (m_Role == plNetworkRoleEnum::Server)
-  {
-    FlushOutgoingBuffer();
-    m_pDriver->Flush();
-  }
+  // Whatever is still queued, such as the disconnect a stopping peer sends, goes out before the driver closes.
+  Flush();
 
   m_pDriver->Shutdown();
   PL_DEFAULT_DELETE(m_pDriver);
@@ -124,6 +118,11 @@ void plNetworkPeer::Shutdown()
   DestroyMessageBuffers();
   m_OutgoingBuffer.Clear();
   m_MessagePool.Clear();
+
+  for (plUInt8* pBuffer : m_ScratchBuffers)
+    plFoundation::GetDefaultAllocator()->Deallocate(pBuffer);
+  m_ScratchBuffers.Clear();
+  m_uiScratchInUse = 0;
 
   m_pDriver = nullptr;
 }
@@ -144,12 +143,16 @@ plResult plNetworkPeer::Connect()
 void plNetworkPeer::Disconnect()
 {
   plLog::Info("PL Net: Network Peer Disconnecting");
+
+  // The disconnect message and anything else queued go out before the connection closes.
+  Flush();
   m_pDriver->Disconnect();
 }
 
 void plNetworkPeer::Disconnect(const plNetworkConnection& connection)
 {
   plLog::Info("PL Net: Network Peer Disconnecting");
+  Flush();
   m_pDriver->Disconnect(connection);
 }
 plResult plNetworkPeer::PopEvent(plNetworkEvent& event)
@@ -158,67 +161,53 @@ plResult plNetworkPeer::PopEvent(plNetworkEvent& event)
   return m_pDriver->PopEvent(event);
 }
 
-void plNetworkPeer::SendMessages(const plNetworkMessage& message)
+plResult plNetworkPeer::Enqueue(const plNetworkMessage& message, bool bToServer, plArrayPtr<const plNetworkConnection> targets)
 {
-  if (!message.IsValid() || message.HasWriteError())
+  if (!message.IsValid() || message.HasWriteError() || message.m_uiLength == 0)
   {
-    plLog::Error("PL Net: Dropping invalid outgoing message");
-    if (message.IsValid())
+    // A message that did not fit its buffer is not sent in part. The caller keeps the state it meant to send.
+    const plTime now = plNetworkClock::Now();
+    if (now - m_LastSendErrorLog > plTime::MakeFromSeconds(1.0))
     {
-      plNetworkMessage messageToRelease = message;
-      DestroyMessage(messageToRelease);
+      plLog::Error("PL Net: Not sending a message that is invalid or larger than {} bytes", m_Config.m_uiMessageSize);
+      m_LastSendErrorLog = now;
     }
-    return;
+    return PL_FAILURE;
   }
 
-  plBufferMessage buffer;
-  buffer.m_bIsClient = true;
-  buffer.m_message = message;
-  buffer.m_QueueTime = plNetworkClock::Now();
+  if (!bToServer && targets.IsEmpty())
+    return PL_SUCCESS;
 
-  m_OutgoingBuffer.PushBack(buffer);
+  plBufferMessage& buffer = m_OutgoingBuffer.ExpandAndGetRef();
+  buffer.m_bToServer = bToServer;
+  buffer.m_Targets = targets;
+  buffer.m_ChannelType = message.GetChannelType();
+  buffer.m_Data.SetCountUninitialized(message.m_uiLength);
+  plMemoryUtils::Copy(buffer.m_Data.GetData(), message.m_pBuffer, message.m_uiLength);
+  return PL_SUCCESS;
 }
 
-void plNetworkPeer::SendMessages(const plNetworkMessage& message, plNetworkConnection target)
+plResult plNetworkPeer::SendToServer(const plNetworkMessage& message)
 {
-  if (!message.IsValid() || message.HasWriteError())
-  {
-    plLog::Error("PL Net: Dropping invalid outgoing message");
-    if (message.IsValid())
-    {
-      plNetworkMessage messageToRelease = message;
-      DestroyMessage(messageToRelease);
-    }
-    return;
-  }
+  PL_ASSERT_DEV(m_Role != plNetworkRoleEnum::Server, "SendToServer is only valid on a client; a listening peer names its targets");
+  if (m_Role == plNetworkRoleEnum::Server)
+    return PL_FAILURE;
 
-  plBufferMessage buffer;
-  buffer.m_Targets.PushBack(target);
-  buffer.m_message = message;
-  buffer.m_QueueTime = plNetworkClock::Now();
-
-  m_OutgoingBuffer.PushBack(buffer);
+  return Enqueue(message, true, {});
 }
 
-void plNetworkPeer::SendMessages(const plNetworkMessage& message, plDynamicArray<plNetworkConnection> target)
+plResult plNetworkPeer::SendTo(const plNetworkMessage& message, const plNetworkConnection& target)
 {
-  if (!message.IsValid() || message.HasWriteError())
-  {
-    plLog::Error("PL Net: Dropping invalid outgoing message");
-    if (message.IsValid())
-    {
-      plNetworkMessage messageToRelease = message;
-      DestroyMessage(messageToRelease);
-    }
-    return;
-  }
+  return SendTo(message, plArrayPtr<const plNetworkConnection>(&target, 1));
+}
 
-  plBufferMessage buffer;
-  buffer.m_Targets = target;
-  buffer.m_message = message;
-  buffer.m_QueueTime = plNetworkClock::Now();
+plResult plNetworkPeer::SendTo(const plNetworkMessage& message, plArrayPtr<const plNetworkConnection> targets)
+{
+  PL_ASSERT_DEV(m_Role == plNetworkRoleEnum::Server, "SendTo is only valid on a listening peer; a client sends to the server");
+  if (m_Role != plNetworkRoleEnum::Server)
+    return PL_FAILURE;
 
-  m_OutgoingBuffer.PushBack(buffer);
+  return Enqueue(message, false, targets);
 }
 
 plNetworkDriverInterface* plNetworkPeer::GetTransportDriver() const
@@ -293,10 +282,7 @@ void plNetworkPeer::DestroyMessageBuffers()
 plNetworkMessage plNetworkPeer::CreateMessage()
 {
   if (m_MessagePool.GetCount() == 0)
-  {
-    plLog::Error("PL Net: Message pool exhausted - messages are not being cleaned up properly or pool size is too small");
-    return plNetworkMessage(); // Return invalid message instead of crashing
-  }
+    return plNetworkMessage(); // The driver leaves the packet queued until a buffer is free again.
 
   const plUInt32 messageId = m_MessagePool.PeekBack();
 
@@ -315,45 +301,29 @@ void plNetworkPeer::DestroyMessage(plNetworkMessage& message)
     plLog::Warning("PL Net: Invalid message");
     return;
   }
-  m_MessagePool.PushBack(message.m_uiMessageID);
+
   message.m_bPendingRelease = true;
+  if (!IsValidMessageID(message.m_uiMessageID))
+    return; // a scratch buffer, recycled in Update()
+
+  m_MessagePool.PushBack(message.m_uiMessageID);
   plMemoryUtils::PatternFill(message.m_pBuffer, 0xDD, message.m_uiLength);
 }
 
 plNetworkMessage plNetworkPeer::BeginSendMessage()
 {
-  return CreateMessage();
+  if (m_uiScratchInUse == m_ScratchBuffers.GetCount())
+    m_ScratchBuffers.PushBack(static_cast<plUInt8*>(plFoundation::GetDefaultAllocator()->Allocate(m_Config.m_uiMessageSize, 16)));
+
+  // IDs at and above the pool size mark scratch buffers, which never return to the incoming pool.
+  const plUInt32 uiIndex = m_uiScratchInUse++;
+  return plNetworkMessage(m_ScratchBuffers[uiIndex], m_Config.m_uiMessagePoolSize + uiIndex, m_Config.m_uiMessageSize, 0, 0);
 }
 
 void plNetworkPeer::CancelSendMessage(plNetworkMessage& message)
 {
-  PL_ASSERT_DEV(message.IsValid(), "Invalid message");
-  DestroyMessage(message);
+  message.m_bPendingRelease = true;
 }
-
-//bool plNetworkPeer::EndSendMessage(plNetworkChannelTypeEnum::Enum channelType, plNetworkMessage& message)
-//{
-//  PL_ASSERT_DEV(message.IsValid(), "Invalid message");
-//  g_pDriver->SendMessages(channelType, message);
-//  DestroyMessage(message);
-//  return false;
-//}
-//
-//bool plNetworkPeer::EndSendMessage(plNetworkChannelTypeEnum::Enum channelType, plNetworkMessage& message, const plNetworkConnection& target)
-//{
-//  PL_ASSERT_DEV(message.IsValid(), "Invalid message");
-//  g_pDriver->SendMessages(channelType, message, target);
-//  DestroyMessage(message);
-//  return false;
-//}
-//
-//bool plNetworkPeer::EndSendMessage(plNetworkChannelTypeEnum::Enum channelType, plNetworkMessage& message, const plDynamicArray<plNetworkConnection>& targets)
-//{
-//  PL_ASSERT_DEV(message.IsValid(), "Invalid message");
-//  g_pDriver->SendMessages(channelType, message, targets);
-//  DestroyMessage(message);
-//  return false;
-//}
 
 bool plNetworkPeer::IsValidMessageID(plUInt32 messageID) const
 {
@@ -364,46 +334,42 @@ bool plNetworkPeer::IsValidMessageID(plUInt32 messageID) const
 void plNetworkPeer::Update(float dt)
 {
   PL_IGNORE_UNUSED(dt);
+  Flush();
+
+  // Every send copied its bytes, so no scratch buffer handed out before this point is still needed.
+  m_uiScratchInUse = 0;
+}
+
+void plNetworkPeer::Flush()
+{
   FlushOutgoingBuffer();
 
   if (m_pDriver)
-  {
     m_pDriver->Flush();
-  }
 }
 
 void plNetworkPeer::DispatchBufferedMessage(plBufferMessage& bufferMessage)
 {
-  plNetworkMessage& msg = bufferMessage.m_message;
+  const plUInt32 uiLength = bufferMessage.m_Data.GetCount();
+  plNetworkMessage msg(bufferMessage.m_Data.GetData(), 0, uiLength, uiLength, 0);
+  msg.SetChannelType(bufferMessage.m_ChannelType);
 
-  if (bufferMessage.m_bIsClient)
-  {
-    m_pDriver->SendMessages(msg.m_ChannelType, msg);
-  }
+  if (bufferMessage.m_bToServer)
+    m_pDriver->SendMessages(bufferMessage.m_ChannelType, msg);
   else if (bufferMessage.m_Targets.GetCount() == 1)
-  {
-    m_pDriver->SendMessages(msg.m_ChannelType, msg, bufferMessage.m_Targets[0]);
-  }
+    m_pDriver->SendMessages(bufferMessage.m_ChannelType, msg, bufferMessage.m_Targets[0]);
   else
-  {
-    m_pDriver->SendMessages(msg.m_ChannelType, msg, bufferMessage.m_Targets);
-  }
+    m_pDriver->SendMessages(bufferMessage.m_ChannelType, msg, bufferMessage.m_Targets);
 }
 
 void plNetworkPeer::FlushOutgoingBuffer()
 {
-  if (m_OutgoingBuffer.IsEmpty())
+  if (m_OutgoingBuffer.IsEmpty() || !m_pDriver)
     return;
 
-  m_OutgoingBuffer.Sort([](const plBufferMessage& a, const plBufferMessage& b) {
-    return a.GetEffectivePriority() < b.GetEffectivePriority();
-  });
-
-  for (auto& bufferMessage : m_OutgoingBuffer)
-  {
+  // First in, first out: reliable ordered messages reach the driver in the order they were sent.
+  for (plBufferMessage& bufferMessage : m_OutgoingBuffer)
     DispatchBufferedMessage(bufferMessage);
-    DestroyMessage(bufferMessage.m_message);
-  }
 
   m_OutgoingBuffer.Clear();
 }
