@@ -126,7 +126,7 @@ PL_CREATE_SIMPLE_TEST(Network, ReplicationDefaults)
     PumpFor(all, plTime::MakeFromMilliseconds(200));
 
     a.Simulate(plNetworkSimulationSettings());
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return pCounterA->m_uiValue == 5; }, plTime::MakeFromSeconds(2)), "the client holds %u", pCounterA->m_uiValue);
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return pCounterA->m_uiValue == 5; }, plTime::MakeFromSeconds(2)), "the client holds %u", pCounterA->m_uiValue);
   }
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "D24: the default priority does not cap how often a component is sent")
@@ -278,8 +278,9 @@ PL_CREATE_SIMPLE_TEST(Network, ReplicationUnderConditions)
         }
         PumpFor(all, plTime::MakeFromMilliseconds(15));
       }
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return a.m_Replicas[0].m_pTarget->m_iValue == 30 && b.m_Replicas[0].m_pTarget->m_iValue == 30; }, timeout),
-        "%s: scene state ends at %d and %d", c.m_szName, a.m_Replicas[0].m_pTarget->m_iValue, b.m_Replicas[0].m_pTarget->m_iValue);
+      // Each wait runs before its message is formatted, so a message shows the values the wait ended on.
+      const bool bSceneState = PumpAll(all, [&] { return a.m_Replicas[0].m_pTarget->m_iValue == 30 && b.m_Replicas[0].m_pTarget->m_iValue == 30; }, timeout);
+      PL_TEST_BOOL_MSG(bSceneState, "%s: scene state ends at %d and %d", c.m_szName, a.m_Replicas[0].m_pTarget->m_iValue, b.m_Replicas[0].m_pTarget->m_iValue);
 
       // Spawns with state, one despawned again.
       const plUInt32 uiKept = host.Spawn(prefabs.m_sPawn, 0);
@@ -290,8 +291,8 @@ PL_CREATE_SIMPLE_TEST(Network, ReplicationUnderConditions)
         host.FindSpawnedComponent<plNetworkReplicaTargetComponent>(uiKept)->m_iValue = 55;
       }
       host.Despawn(uiGone);
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return SpawnedValue(a, uiKept) == 55 && SpawnedValue(b, uiKept) == 55 && !a.FindSpawned(uiGone) && !b.FindSpawned(uiGone); }, timeout),
-        "%s: spawned state ends at %d and %d", c.m_szName, SpawnedValue(a, uiKept), SpawnedValue(b, uiKept));
+      const bool bSpawns = PumpAll(all, [&] { return SpawnedValue(a, uiKept) == 55 && SpawnedValue(b, uiKept) == 55 && !a.FindSpawned(uiGone) && !b.FindSpawned(uiGone); }, timeout);
+      PL_TEST_BOOL_MSG(bSpawns, "%s: spawned state ends at %d and %d", c.m_szName, SpawnedValue(a, uiKept), SpawnedValue(b, uiKept));
 
       // Reliable RPCs: every call once, in order.
       {
@@ -300,14 +301,14 @@ PL_CREATE_SIMPLE_TEST(Network, ReplicationUnderConditions)
         for (plInt32 i = 0; i < 10; ++i)
           host.m_pModule->GetRpcManager()->CallRpc(pProbe, "RpcAllClients", i);
       }
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return HasArguments(a, uiKept, 10) && HasArguments(b, uiKept, 10); }, timeout), "%s: RPCs", c.m_szName);
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return HasArguments(a, uiKept, 10) && HasArguments(b, uiKept, 10); }, timeout), "%s: RPCs", c.m_szName);
 
       // A transform that stops moving ends where it stopped.
       {
         PL_LOCK(host.m_World.GetWriteMarker());
         pMover->SetGlobalPosition(plVec3(5.0f, 5.0f, 5.0f));
       }
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return pMoverA->GetGlobalPosition().IsEqual(plVec3(5.0f), 0.01f) && pMoverB->GetGlobalPosition().IsEqual(plVec3(5.0f), 0.01f); }, timeout),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return pMoverA->GetGlobalPosition().IsEqual(plVec3(5.0f), 0.01f) && pMoverB->GetGlobalPosition().IsEqual(plVec3(5.0f), 0.01f); }, timeout),
         "%s: transform", c.m_szName);
 
       PL_TEST_BOOL_MSG(a.m_pModule->IsConnected() && b.m_pModule->IsConnected(), "%s: a client disconnected", c.m_szName);

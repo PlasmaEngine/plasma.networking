@@ -102,13 +102,13 @@ namespace
       pObject->SetGlobalPosition(vPosition);
   }
 
-  void SetReplicaValue(NetworkEndpoint& endpoint, plUInt32 uiReplica, plInt32 iValue)
+  void SetSceneValue(NetworkEndpoint& endpoint, plUInt32 uiReplica, plInt32 iValue)
   {
     PL_LOCK(endpoint.m_World.GetWriteMarker());
     endpoint.m_Replicas[uiReplica].m_pTarget->m_iValue = iValue;
   }
 
-  plInt32 ReplicaValue(NetworkEndpoint& endpoint, plUInt32 uiReplica) { return endpoint.m_Replicas[uiReplica].m_pTarget->m_iValue; }
+  plInt32 SceneValue(NetworkEndpoint& endpoint, plUInt32 uiReplica) { return endpoint.m_Replicas[uiReplica].m_pTarget->m_iValue; }
 
   const char* RoleName(Role role) { return role == Role::Host ? "host" : "dedicated server"; }
 } // namespace
@@ -131,11 +131,11 @@ PL_CREATE_SIMPLE_TEST(Network, SpawnAndOwnership)
       if (!PL_TEST_BOOL(uiObject != 0))
         return;
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return HasObject(a, uiObject) && HasObject(b, uiObject); }), "%s: spawn", RoleName(role));
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return HasObject(a, uiObject) && HasObject(b, uiObject); }), "%s: spawn", RoleName(role));
       PL_TEST_VEC3(SpawnedPosition(a, uiObject), plVec3(1, 2, 3), 0.001f);
 
       server.Despawn(uiObject);
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return !HasObject(a, uiObject) && !HasObject(b, uiObject); }), "%s: despawn", RoleName(role));
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return !HasObject(a, uiObject) && !HasObject(b, uiObject); }), "%s: despawn", RoleName(role));
     }
 
     PL_TEST_BLOCK(plTestBlock::Enabled, "D02: an ownership transfer reaches both clients")
@@ -158,7 +158,7 @@ PL_CREATE_SIMPLE_TEST(Network, SpawnAndOwnership)
         PL_TEST_BOOL(server.m_pModule->GetObjectManager()->TransferOwnership(uiObject, uiA));
       }
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return a.GetOwnerOf(uiObject) == uiA && b.GetOwnerOf(uiObject) == uiA; }),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return a.GetOwnerOf(uiObject) == uiA && b.GetOwnerOf(uiObject) == uiA; }),
         "%s: the clients still name owner %u and %u instead of %u", RoleName(role), a.GetOwnerOf(uiObject), b.GetOwnerOf(uiObject), uiA);
     }
 
@@ -175,7 +175,7 @@ PL_CREATE_SIMPLE_TEST(Network, SpawnAndOwnership)
       const plUInt32 uiObject = server.Spawn(prefabs.m_sPawn, server.m_pModule->GetServerClientID());
       SetTargetValue(server, uiObject, 42);
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return TargetValue(a, uiObject) == 42 && TargetValue(b, uiObject) == 42; }),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return TargetValue(a, uiObject) == 42 && TargetValue(b, uiObject) == 42; }),
         "%s: the clients hold %d and %d", RoleName(role), TargetValue(a, uiObject), TargetValue(b, uiObject));
     }
 
@@ -203,7 +203,7 @@ PL_CREATE_SIMPLE_TEST(Network, SpawnAndOwnership)
         plNetworkRpcProbeComponent* pProbe = endpoint.FindSpawnedComponent<plNetworkRpcProbeComponent>(uiObject);
         return pProbe ? pProbe->m_uiAllClients : 0u;
       };
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return Calls(a) == 1 && Calls(b) == 1; }), "%s: the clients ran it %u and %u times", RoleName(role), Calls(a), Calls(b));
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return Calls(a) == 1 && Calls(b) == 1; }), "%s: the clients ran it %u and %u times", RoleName(role), Calls(a), Calls(b));
     }
 
     PL_TEST_BLOCK(plTestBlock::Enabled, "D10: the child components of two instances of one prefab replicate separately")
@@ -225,7 +225,7 @@ PL_CREATE_SIMPLE_TEST(Network, SpawnAndOwnership)
       SetTargetValue(server, uiFirst, 8, "Arm");
       SetTargetValue(server, uiSecond, 9, "Arm");
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return TargetValue(a, uiFirst, "Arm") == 8 && TargetValue(a, uiSecond, "Arm") == 9; }),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return TargetValue(a, uiFirst, "Arm") == 8 && TargetValue(a, uiSecond, "Arm") == 9; }),
         "%s: client A holds %d and %d", RoleName(role), TargetValue(a, uiFirst, "Arm"), TargetValue(a, uiSecond, "Arm"));
     }
   }
@@ -243,9 +243,9 @@ PL_CREATE_SIMPLE_TEST(Network, SpawnAndOwnership)
     if (!PL_TEST_BOOL(ConnectAll(all, host, {&a})))
       return;
 
-    SetReplicaValue(host, 0, 1);
-    SetReplicaValue(host, 1, 2);
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return ReplicaValue(a, 0) == 1 && ReplicaValue(a, 1) == 2; }), "client holds %d and %d", ReplicaValue(a, 0), ReplicaValue(a, 1));
+    SetSceneValue(host, 0, 1);
+    SetSceneValue(host, 1, 2);
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return SceneValue(a, 0) == 1 && SceneValue(a, 1) == 2; }), "client holds %d and %d", SceneValue(a, 0), SceneValue(a, 1));
   }
 }
 
@@ -277,7 +277,7 @@ PL_CREATE_SIMPLE_TEST(Network, LateJoin)
       if (!PL_TEST_BOOL(b.Start(false, server.GetPort())))
         return;
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return TargetValue(b, objects[0]) == 10 && TargetValue(b, objects[1]) == 11 && TargetValue(b, objects[2]) == 12; }),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return TargetValue(b, objects[0]) == 10 && TargetValue(b, objects[1]) == 11 && TargetValue(b, objects[2]) == 12; }),
         "%s: the late joiner holds %d, %d and %d", RoleName(role), TargetValue(b, objects[0]), TargetValue(b, objects[1]), TargetValue(b, objects[2]));
     }
 
@@ -327,7 +327,7 @@ PL_CREATE_SIMPLE_TEST(Network, ClientOwnedState)
 
       const plVec3 vTarget(4.0f, -2.0f, 1.0f);
       MoveSpawned(a, uiObject, vTarget);
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return SpawnedPosition(server, uiObject).IsEqual(vTarget, 0.01f) && SpawnedPosition(b, uiObject).IsEqual(vTarget, 0.01f); }),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return SpawnedPosition(server, uiObject).IsEqual(vTarget, 0.01f) && SpawnedPosition(b, uiObject).IsEqual(vTarget, 0.01f); }),
         "%s: server at (%.2f %.2f %.2f), B at (%.2f %.2f %.2f)", RoleName(role), SpawnedPosition(server, uiObject).x, SpawnedPosition(server, uiObject).y,
         SpawnedPosition(server, uiObject).z, SpawnedPosition(b, uiObject).x, SpawnedPosition(b, uiObject).y, SpawnedPosition(b, uiObject).z);
       PL_TEST_BOOL_MSG(SpawnedPosition(a, uiObject).IsEqual(vTarget, 0.001f), "The owner keeps the transform it simulates.");
@@ -357,7 +357,7 @@ PL_CREATE_SIMPLE_TEST(Network, ClientOwnedState)
       PumpFor(all, plTime::MakeFromMilliseconds(60));
       SetTargetPosition(a, uiObject, plVec3(2.0f, 0.0f, 0.0f));
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return TargetPosition(b, uiObject).IsEqual(plVec3(2.0f, 0.0f, 0.0f), 0.001f); }),
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return TargetPosition(b, uiObject).IsEqual(plVec3(2.0f, 0.0f, 0.0f), 0.001f); }),
         "%s: B ends at x = %.3f", RoleName(role), TargetPosition(b, uiObject).x);
     }
 
@@ -385,7 +385,7 @@ PL_CREATE_SIMPLE_TEST(Network, ClientOwnedState)
       PumpAll(all, [&] { return TargetValue(b, uiObject) == 1; });
       SetTargetValue(a, uiObject, 2);
 
-      PL_TEST_BOOL_MSG(PumpAll(all, [&] { return TargetValue(b, uiObject) == 2; }), "%s: B holds %d", RoleName(role), TargetValue(b, uiObject));
+      NETWORK_TEST_WAIT(PumpAll(all, [&] { return TargetValue(b, uiObject) == 2; }), "%s: B holds %d", RoleName(role), TargetValue(b, uiObject));
     }
   }
 
@@ -407,7 +407,7 @@ PL_CREATE_SIMPLE_TEST(Network, ClientOwnedState)
     SetTargetValue(host, uiObject, 5);
     MoveSpawned(host, uiObject, plVec3(3.0f, 3.0f, 3.0f));
 
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return TargetValue(a, uiObject) == 5 && TargetValue(b, uiObject) == 5; }), "the clients hold %d and %d",
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return TargetValue(a, uiObject) == 5 && TargetValue(b, uiObject) == 5; }), "the clients hold %d and %d",
       TargetValue(a, uiObject), TargetValue(b, uiObject));
     PL_TEST_BOOL(PumpAll(all, [&] { return SpawnedPosition(a, uiObject).IsEqual(plVec3(3.0f), 0.01f); }));
   }
@@ -432,7 +432,7 @@ PL_CREATE_SIMPLE_TEST(Network, LevelTravel)
 
     // The host is already in the new level and changes its state while the client still loads it.
     host.AddReplica("Level2Crate", plReplicateAuthority::Server);
-    SetReplicaValue(host, 0, 77);
+    SetSceneValue(host, 0, 77);
     PumpFor(all, plTime::MakeFromMilliseconds(200));
 
     a.AddReplica("Level2Crate", plReplicateAuthority::Server);
@@ -442,7 +442,7 @@ PL_CREATE_SIMPLE_TEST(Network, LevelTravel)
     }
 
     PL_TEST_BOOL(PumpAll(all, [&] { return a.m_pModule->GetLevelManager()->GetState() == plNetworkLevelState::Ready; }));
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return ReplicaValue(a, 0) == 77; }), "the client holds %d", ReplicaValue(a, 0));
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return SceneValue(a, 0) == 77; }), "the client holds %d", SceneValue(a, 0));
   }
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "D29: a client that disconnects during a level load does not hold the level")
@@ -467,7 +467,7 @@ PL_CREATE_SIMPLE_TEST(Network, LevelTravel)
       a.m_pModule->GetLevelManager()->NotifyLoadComplete();
     }
 
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return host.m_pModule->GetLevelManager()->GetState() == plNetworkLevelState::Ready; }, plTime::MakeFromSeconds(3)),
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return host.m_pModule->GetLevelManager()->GetState() == plNetworkLevelState::Ready; }, plTime::MakeFromSeconds(3)),
       "The host still waits for the client that left.");
   }
 }

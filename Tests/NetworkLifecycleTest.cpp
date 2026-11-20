@@ -202,7 +202,7 @@ PL_CREATE_SIMPLE_TEST(Network, Lifecycle)
 
     const plUInt32 uiSecond = second.Spawn(sPawn, 0);
     PL_TEST_INT(uiSecond, uiFirst);
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return a.FindSpawned(uiSecond) != nullptr && a.FindSpawned(uiSecond)->GetHandle() != hFirst; }),
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return a.FindSpawned(uiSecond) != nullptr && a.FindSpawned(uiSecond)->GetHandle() != hFirst; }),
       "The client took the new object for a duplicate of one from the old session.");
   }
 
@@ -223,7 +223,7 @@ PL_CREATE_SIMPLE_TEST(Network, Lifecycle)
       return;
 
     a.Stop();
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return host.FindSpawned(uiObject) == nullptr && b.FindSpawned(uiObject) == nullptr; }),
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return host.FindSpawned(uiObject) == nullptr && b.FindSpawned(uiObject) == nullptr; }),
       "The object of the client that left is still in the session.");
   }
 

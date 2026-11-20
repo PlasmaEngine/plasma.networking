@@ -268,7 +268,7 @@ PL_CREATE_SIMPLE_TEST(Network, RpcRouting)
       msg.WriteUInt8(plVariantType::Float);
       msg.WriteFloat(1.5f);
       msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-      pPeer->SendMessages(msg, session.m_Server.FindClient(session.m_A)->m_Connection);
+      pPeer->SendTo(msg, session.m_Server.FindClient(session.m_A)->m_Connection).IgnoreResult();
     }
     PumpFor(session.m_All, plTime::MakeFromMilliseconds(100));
 
@@ -288,8 +288,8 @@ PL_CREATE_SIMPLE_TEST(Network, RpcRouting)
     if (!PL_TEST_BOOL(session.Start(Role::Host, session.m_Prefabs.m_sProbe)))
       return;
 
-    // As many as the message pool of the test endpoints holds at once.
-    const plUInt32 uiCalls = 60;
+    // More than the 64-message pool of the test endpoints, queued within microseconds of each other.
+    const plUInt32 uiCalls = 200;
     {
       PL_LOCK(session.m_Server.m_World.GetWriteMarker());
       for (plUInt32 i = 0; i < uiCalls; ++i)

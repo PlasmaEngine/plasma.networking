@@ -105,7 +105,7 @@ PL_CREATE_SIMPLE_TEST(Network, AdmissionAndLifetime)
     if (host.m_pModule->GetClients().IsEmpty()) return;
     plNetworkMessage msg = host.m_pModule->GetPeer()->BeginSendMessage();
     msg.WriteUInt8(plNetworkMessageIDs::Handshake);
-    host.m_pModule->GetPeer()->SendMessages(msg, host.m_pModule->GetClients()[0]->m_Connection);
+    host.m_pModule->GetPeer()->SendTo(msg, host.m_pModule->GetClients()[0]->m_Connection).IgnoreResult();
     PL_TEST_BOOL(PumpUntil(host, &client, nullptr, [&] { return client.m_pModule->GetPeer() == nullptr; }));
   }
 }

@@ -83,7 +83,7 @@ PL_CREATE_SIMPLE_TEST(Network, Blackboard)
     if (!PL_TEST_BOOL(b.Start(false, host.GetPort())))
       return;
 
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return Entry(pBoardB, "Health") == 5 && Entry(pBoardB, "Ammo") == 3; }), "the late joiner holds Health %d, Ammo %d",
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return Entry(pBoardB, "Health") == 5 && Entry(pBoardB, "Ammo") == 3; }), "the late joiner holds Health %d, Ammo %d",
       Entry(pBoardB, "Health"), Entry(pBoardB, "Ammo"));
   }
 
@@ -109,7 +109,7 @@ PL_CREATE_SIMPLE_TEST(Network, Blackboard)
       pHostBoard->RemoveEntry(sAmmo);
     }
 
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return Entry(pBoardA, "Ammo") == -1; }), "the client still holds Ammo %d", Entry(pBoardA, "Ammo"));
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return Entry(pBoardA, "Ammo") == -1; }), "the client still holds Ammo %d", Entry(pBoardA, "Ammo"));
     PL_TEST_INT(Entry(pBoardA, "Health"), 5);
   }
 
@@ -132,7 +132,7 @@ PL_CREATE_SIMPLE_TEST(Network, Blackboard)
     Set(host, pHostBoard, "Score", 9);
     host.Pump();
 
-    PL_TEST_BOOL_MSG(PumpAll(Pumped({&host, &a}, {&late}), [&] { return Entry(pBoardA, "Score") == 9; }), "the connected client holds Score %d", Entry(pBoardA, "Score"));
+    NETWORK_TEST_WAIT(PumpAll(Pumped({&host, &a}, {&late}), [&] { return Entry(pBoardA, "Score") == 9; }), "the connected client holds Score %d", Entry(pBoardA, "Score"));
     late.Disconnect();
   }
 
@@ -161,7 +161,7 @@ PL_CREATE_SIMPLE_TEST(Network, Blackboard)
     PumpFor(all, plTime::MakeFromMilliseconds(100));
 
     Set(a, SpawnedBoard(a, uiObject), "Score", 7);
-    PL_TEST_BOOL_MSG(PumpAll(all, [&] { return Entry(SpawnedBoard(host, uiObject), "Score") == 7 && Entry(SpawnedBoard(b, uiObject), "Score") == 7; }),
+    NETWORK_TEST_WAIT(PumpAll(all, [&] { return Entry(SpawnedBoard(host, uiObject), "Score") == 7 && Entry(SpawnedBoard(b, uiObject), "Score") == 7; }),
       "host holds %d, B holds %d", Entry(SpawnedBoard(host, uiObject), "Score"), Entry(SpawnedBoard(b, uiObject), "Score"));
   }
 }

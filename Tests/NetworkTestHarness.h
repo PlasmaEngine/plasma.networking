@@ -22,6 +22,15 @@
 
 #include <initializer_list>
 
+/// \brief Checks a wait and reports it with a message whose values are read after the wait ended. The arguments of
+/// PL_TEST_BOOL_MSG are evaluated in no fixed order, so a wait passed to it directly can be reported with stale values.
+#define NETWORK_TEST_WAIT(wait, msg, ...)        \
+  do                                             \
+  {                                              \
+    const bool bWaitHeld_ = (wait);              \
+    PL_TEST_BOOL_MSG(bWaitHeld_, msg, ##__VA_ARGS__); \
+  } while (false)
+
 class plNetworkSecurityComponent;
 using plNetworkSecurityComponentManager = plComponentManager<plNetworkSecurityComponent, plBlockStorageType::Compact>;
 
