@@ -36,8 +36,9 @@ public:
   /// Connects to the user named by m_sServerAddress; see ParseUserAddress for the accepted forms.
   PL_NODISCARD plResult Connect() override;
 
-  void Disconnect() override;
-  void Disconnect(const plNetworkConnection& connection) override;
+  /// \brief The platform transport carries no disconnect reason; the Disconnect message sent before it is the only one.
+  void Disconnect(plUInt32 uiReason = 0) override;
+  void Disconnect(const plNetworkConnection& connection, plUInt32 uiReason = 0) override;
 
   PL_NODISCARD plResult PopEvent(plNetworkEvent& event) override;
 

@@ -34,9 +34,15 @@ public:
 
   PL_NODISCARD virtual plResult Connect() = 0;
 
-  virtual void Disconnect() = 0;
+  /// \brief Closes connections. uiReason (a plNetworkDisconnectReason) travels with the disconnect where the transport can
+  /// carry it, and arrives as plNetworkEvent::m_uiData; a reason sent as a message can be lost when the connection closes
+  /// right behind it.
+  virtual void Disconnect(plUInt32 uiReason = 0) = 0;
 
-  virtual void Disconnect(const plNetworkConnection& connection) = 0;
+  virtual void Disconnect(const plNetworkConnection& connection, plUInt32 uiReason = 0) = 0;
+
+  /// \brief Server side: closes every connection.
+  virtual void DisconnectAll(plUInt32 uiReason) { PL_IGNORE_UNUSED(uiReason); }
 
   PL_NODISCARD virtual plResult PopEvent(plNetworkEvent& event) = 0;
 

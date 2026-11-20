@@ -7,6 +7,22 @@
 class plNetworkWorldModule;
 class plNetworkMessage;
 
+/// @brief The local clock every networking time stamp is taken from: plTime::Now() plus a process-wide offset.
+///
+/// The offset is zero unless a test sets it, to run a session as if the machine had been up for days. Keep durations
+/// and time stamps as plTime; a float holds an absolute time to only 15.6 ms after 1.5 days of uptime.
+class PL_NETWORKPLUGIN_DLL plNetworkClock
+{
+public:
+  static plTime Now() { return plTime::Now() + s_Offset; }
+
+  static void SetOffset(plTime offset) { s_Offset = offset; }
+  static plTime GetOffset() { return s_Offset; }
+
+private:
+  static plTime s_Offset;
+};
+
 /// @brief Manages synchronized network time between server and clients.
 /// 
 /// The server is the authoritative time source. Clients periodically sync
@@ -42,8 +58,8 @@ public:
   /// On client: returns estimated server time
   plTime GetNetworkTime() const;
 
-  /// @brief Get network time as float seconds (convenience)
-  float GetNetworkTimeSeconds() const { return static_cast<float>(GetNetworkTime().GetSeconds()); }
+  /// @brief Get network time in seconds. A double: a float holds an absolute time to only 15.6 ms after 1.5 days.
+  double GetNetworkTimeSeconds() const { return GetNetworkTime().GetSeconds(); }
 
   /// @brief Get the local time offset from server
   /// Positive = local clock is ahead of server
@@ -87,6 +103,9 @@ public:
   /// @brief Handle incoming time sync request (server-side)
   void HandleTimeSyncRequest(plNetworkMessage& msg, plUInt32 uiClientID);
 
+  /// @brief Server side: forgets the rate-limit record of a client that left.
+  void OnClientDisconnected(plUInt32 uiClientID) { m_LastServerResponseByClient.Remove(uiClientID); }
+
   /// @brief Handle incoming time sync response (client-side)
   void HandleTimeSyncResponse(plNetworkMessage& msg);
 
@@ -107,6 +126,8 @@ public:
   bool HasPassed(plTime networkTimestamp) const;
 
 private:
+  friend class plNetworkTestAccess;
+
   void SendSyncRequest();
   void CalculateOffset(plTime t0ClientSend, plTime t1ServerReceive, plTime t2ServerSend, plTime t3ClientReceive);
 

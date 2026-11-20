@@ -89,22 +89,6 @@ namespace
     hash = plHashingUtils::CombineHashValues32(hash, uiTypeIndex);
     return hash | 0x80000000u;
   }
-
-  plUInt32 ComputeSpawnedComponentNetID(plUInt32 uiObjectNetID, const plNetworkComponent* pComponent)
-  {
-    plUInt32 uiTypeIndex = 0;
-    for (const plComponent* pSibling : pComponent->GetOwner()->GetComponents())
-    {
-      if (pSibling == pComponent)
-        break;
-      if (pSibling->GetDynamicRTTI() == pComponent->GetDynamicRTTI())
-        ++uiTypeIndex;
-    }
-
-    plUInt32 hash = plHashingUtils::CombineHashValues32(uiObjectNetID, plHashingUtils::StringHash(pComponent->GetDynamicRTTI()->GetTypeName()));
-    hash = plHashingUtils::CombineHashValues32(hash, uiTypeIndex);
-    return hash == 0 ? 1 : hash;
-  }
 }
 
 plNetworkWorldModule::plNetworkWorldModule(plWorld* pWorld)
@@ -114,7 +98,9 @@ plNetworkWorldModule::plNetworkWorldModule(plWorld* pWorld)
 
 plNetworkWorldModule::~plNetworkWorldModule()
 {
+  m_bDestroying = true;
   m_NetworkComponents.Clear();
+  m_ComponentsByNetID.Clear();
   m_NetworkObjects.Clear();
   Stop();
   m_Session.Shutdown();
@@ -364,16 +350,23 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   }
 
   PL_PROFILE_SCOPE("Network Stop");
-  plLog::Dev("Stopping Network (reason: {})", static_cast<plUInt8>(reason));
 
-  // Broadcast disconnect reason to all connected clients
-  if (m_pPeer && m_Role == plNetworkRoleEnum::Host)
-  {
-    BroadcastDisconnect(reason);
-  }
-  else if (m_pPeer && m_Role == plNetworkRoleEnum::Client)
+  // A host or dedicated server that stops without a reason of its own is shutting the session down.
+  if (m_Role != plNetworkRoleEnum::Client && reason == plNetworkDisconnectReason::ClientQuit)
+    reason = plNetworkDisconnectReason::ServerShutdown;
+
+  plLog::Dev("Stopping Network (reason: {})", static_cast<plUInt8>(reason));
+  m_LastDisconnectReason = reason;
+
+  // Every admitted client, or the server, learns why; the peer sends it before the connections close.
+  if (m_pPeer && m_Role == plNetworkRoleEnum::Client)
   {
     SendDisconnect(reason);
+  }
+  else if (m_pPeer)
+  {
+    BroadcastDisconnect(reason);
+    m_pPeer->DisconnectAll(reason);
   }
 
   m_Status = plNetworkConnectionState::Disconnecting;
@@ -412,6 +405,15 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   StopPeer();
   m_LevelManager.Shutdown();
   m_LevelManager.Initialize(this);
+
+  // The next session starts clean: no objects or NetIDs, no clock offset, no held messages.
+  m_ObjectManager.ResetSession(!m_bDestroying);
+  m_NetworkTime.Initialize(this);
+  m_ReplicationAccumulator = plTime::MakeZero();
+
+  m_HeldMessages.Clear();
+  m_HeldReady.Clear();
+  m_uiHeldBytes = 0;
   if (m_pLocalClient)
   {
     PL_DEFAULT_DELETE(m_pLocalClient);
@@ -420,75 +422,52 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
 
   m_Status = plNetworkConnectionState::Disconnected;
   m_Role = plNetworkRoleEnum::Undefined;
-  m_LastUpdate = plTime::Now();
+  m_LastUpdate = plNetworkClock::Now();
   BroadcastNetworkStateChange();
 }
 
 void plNetworkWorldModule::RegisterNetworkComponent(plNetworkComponent* pComponent)
 {
-  if (pComponent)
+  if (pComponent == nullptr || m_NetworkComponents.Contains(pComponent))
+    return;
+
+  // A spawned component got its NetID at instantiation. A scene component hashes its path; components with the same
+  // path chain the hash in the order they register, which is the same on every peer that loads the scene.
+  if (pComponent->GetNetID() == 0)
   {
-    // Check if there's a pending spawn network ID (we're in the middle of spawning a network object)
-    plUInt32 pendingID = m_ObjectManager.GetPendingSpawnNetworkID();
-    if (pendingID != 0)
-    {
-      pComponent->SetNetID(ComputeSpawnedComponentNetID(pendingID, pComponent));
-    }
-    else
-    {
-      // Check if this component belongs to a network-spawned object
-      // If so, use the object's network ID so it matches across server/client
-      plGameObjectHandle hOwner = pComponent->GetOwner()->GetHandle();
-      plUInt32 networkObjectID = m_ObjectManager.GetNetworkID(hOwner);
-      
-      if (networkObjectID != 0)
-      {
-        pComponent->SetNetID(ComputeSpawnedComponentNetID(networkObjectID, pComponent));
-      }
-      else
-      {
-        // Scene object - deterministic ID from hierarchical name path + component type.
-        plGameObject* pOwner = pComponent->GetOwner();
-        const plUInt32 sceneID = ComputeSceneNetID(pComponent);
+    plUInt32 uiSceneID = ComputeSceneNetID(pComponent);
+    for (plUInt32 uiChain = 1; m_ComponentsByNetID.Contains(uiSceneID); ++uiChain)
+      uiSceneID = plHashingUtils::CombineHashValues32(uiSceneID, uiChain) | 0x80000000u;
 
-        for (plNetworkComponent* pExisting : m_NetworkComponents)
-        {
-          if (pExisting != pComponent && pExisting->GetNetID() == sceneID)
-          {
-            plLog::Warning(
-              "PL Net: Scene NetID collision {} between '{}' and '{}' - replication will alias these objects; give them unique names.",
-              sceneID,
-              BuildGameObjectPath(pExisting->GetOwner()),
-              BuildGameObjectPath(pOwner));
-            break;
-          }
-        }
-
-        pComponent->SetNetID(sceneID);
-      }
-    }
-    
-    m_NetworkComponents.PushBack(pComponent);
-    
-    // If we're already connected, notify the component immediately
-    if (m_Status == plNetworkConnectionState::Connected)
-    {
-      pComponent->OnNetworkStateChanged(m_Status);
-    }
+    pComponent->SetNetID(uiSceneID);
+  }
+  else if (plNetworkComponent* pExisting = FindNetworkComponent(pComponent->GetNetID()))
+  {
+    plLog::Warning("PL Net: NetID {} of '{}' is already used by '{}'", pComponent->GetNetID(), BuildGameObjectPath(pComponent->GetOwner()),
+      BuildGameObjectPath(pExisting->GetOwner()));
   }
 
-  if (m_uiNextNetID > 4000000000)
-  {
-    plLog::Error("PL Net: Too many networked items in use");
-  }
+  m_NetworkComponents.PushBack(pComponent);
+  m_ComponentsByNetID[pComponent->GetNetID()] = pComponent;
+
+  // Messages that arrived before the component started are applied at the start of the next update, ahead of newer ones.
+  if (m_HeldMessages.Contains(pComponent->GetNetID()))
+    m_HeldReady.PushBack(pComponent->GetNetID());
+
+  if (m_Status == plNetworkConnectionState::Connected)
+    pComponent->OnNetworkStateChanged(m_Status);
 }
 
 void plNetworkWorldModule::RemoveNetworkComponent(plNetworkComponent* pComponent)
 {
-  if (m_NetworkComponents.Contains(pComponent))
-  {
-    m_NetworkComponents.RemoveAndSwap(pComponent);
-  }
+  if (!m_NetworkComponents.RemoveAndSwap(pComponent))
+    return;
+
+  plNetworkComponent* pMapped = nullptr;
+  if (m_ComponentsByNetID.TryGetValue(pComponent->GetNetID(), pMapped) && pMapped == pComponent)
+    m_ComponentsByNetID.Remove(pComponent->GetNetID());
+
+  m_BandwidthManager.RemoveComponentState(pComponent->GetNetID());
 }
 
 void plNetworkWorldModule::RegisterNetworkObject(plNetworkObject* pNetObject)
@@ -527,8 +506,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
     }
   });
   float dt = GetWorld()->GetClock().GetTimeDiff().AsFloatInSeconds();
-  plTime timeNow = plTime::Now();
-  float minDelta = m_fNetworkTickRate > 0 ? 1.0f / m_fNetworkTickRate : 0.0f;
+  plTime timeNow = plNetworkClock::Now();
 
   // Always update bandwidth manager for debug visualization (even when not connected)
   m_BandwidthManager.Update(dt);
@@ -561,6 +539,9 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
   }
 
   PL_PROFILE_SCOPE("Network Update");
+
+  // What arrived before its component started is applied ahead of anything newer.
+  ReleaseHeldMessages();
 
   // Drain incoming events every frame so ENet can flush/receive without tick aliasing.
   plNetworkEvent event;
@@ -613,21 +594,22 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
 
           msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
           m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-          m_pPeer->SendMessages(msg);
+          m_pPeer->SendToServer(msg).IgnoreResult();
         }
         else
         {
           if (event.m_Sender.m_uiConnectionID == 0 || GetClient(event.m_Sender) != nullptr ||
               m_pClients.GetCount() >= m_Config.m_uiConnectionLimit || m_uiNextClientID == 0)
           {
-            m_pPeer->Disconnect(event.m_Sender);
+            const bool bFull = m_pClients.GetCount() >= m_Config.m_uiConnectionLimit;
+            m_pPeer->Disconnect(event.m_Sender, bFull ? plNetworkDisconnectReason::ServerFull : plNetworkDisconnectReason::Unknown);
             break;
           }
           plNetworkClient* pClient = PL_DEFAULT_NEW(plNetworkClient);
           pClient->m_uiClientID = m_uiNextClientID++;
           pClient->m_Connection = event.m_Sender;
           pClient->UpdateActivity(); // Initialize activity timestamp
-          pClient->m_AdmissionStartTime = plTime::Now();
+          pClient->m_AdmissionStartTime = plNetworkClock::Now();
           pClient->m_ConnectionState = plNetworkConnectionState::Connecting;
           m_pClients.PushBack(pClient);
         }
@@ -639,7 +621,11 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
         plLog::Info("Client Disconnected with ID: {}", event.m_Sender.m_uiConnectionID);
         if (IsClient())
         {
-          Stop();
+          // The server's reason travels with the disconnect; without one the connection was lost.
+          plNetworkDisconnectReason::Enum reason = event.m_EventType == plNetworkEventTypeEnum::Timeout ? plNetworkDisconnectReason::Timeout : plNetworkDisconnectReason::Unknown;
+          if (event.m_uiData > plNetworkDisconnectReason::Unknown && event.m_uiData <= plNetworkDisconnectReason::Banned)
+            reason = static_cast<plNetworkDisconnectReason::Enum>(event.m_uiData);
+          Stop(reason);
           return;
         }
         else
@@ -651,13 +637,9 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
             break;
           }
 
-          pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
           plLog::Dev("Client Disconnected with ID: {}", event.m_Sender.m_uiConnectionID);
           m_pClients.RemoveAndCopy(pClient);
-          if (pClient->m_bAdmissionNotified)
-            BroadcastClientDisconnected(pClient);
-          pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
-          PL_DEFAULT_DELETE(pClient);
+          RemoveClient(pClient, pClient->m_bAdmissionNotified);
         }
         break;
       }
@@ -779,85 +761,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
               break;
             }
 
-            // Validate authority before applying state update
-            if (!ValidateStateUpdate(msgData.m_uiUUID, senderClientID))
-            {
-              plLog::Warning("PL Net: Rejected unauthorized state update from client {} for component {}",
-                senderClientID, msgData.m_uiUUID);
-              break;
-            }
-
-            bool bFoundComponent = false;
-            plNetworkComponent* pReplicatedComponent = nullptr;
-            for (plNetworkComponent* pComponent : m_NetworkComponents)
-            {
-              if (msgData.m_uiUUID == pComponent->GetNetID())
-              {
-                bFoundComponent = true;
-                pReplicatedComponent = pComponent;
-                pComponent->NetworkDeserialize(event.m_Message);
-                break; // Found it, no need to continue
-              }
-            }
-            
-            if (!bFoundComponent)
-            {
-              plLog::Warning("PL Net: No component found with NetID {} (total: {})", 
-                msgData.m_uiUUID, m_NetworkComponents.GetCount());
-            }
-              else if (!m_bStopRequested && !event.m_Message.HasReadError() && (IsServer() || IsHost()) && pClient != nullptr && pReplicatedComponent != nullptr &&
-                      (pReplicatedComponent->GetNetworkRole() == plNetworkRoleEnum::Client ||
-                       pReplicatedComponent->GetNetworkRole() == plNetworkRoleEnum::Both))
-            {
-              // Client-role uploads (e.g. owner-writable blackboard) only arrive at the host — relay to other clients.
-              plDynamicArray<plNetworkConnection> connections;
-              for (plNetworkClient* pTargetClient : m_pClients)
-              {
-                if (pTargetClient && pTargetClient->m_ConnectionState == plNetworkConnectionState::Connected &&
-                    pTargetClient->m_uiClientID != pClient->m_uiClientID)
-                {
-                  connections.PushBack(pTargetClient->m_Connection);
-                }
-              }
-
-              if (connections.GetCount() > 0)
-              {
-                if (pReplicatedComponent->RequiresPerRecipientSerialization())
-                {
-                  for (plNetworkClient* pTargetClient : m_pClients)
-                  {
-                    if (!pTargetClient || pTargetClient->m_ConnectionState != plNetworkConnectionState::Connected ||
-                        pTargetClient->m_uiClientID == pClient->m_uiClientID)
-                      continue;
-
-                    plNetworkMessage relayMsg = m_pPeer->BeginSendMessage();
-                    WriteReplicationHeader(relayMsg, m_uiServerClientID, pReplicatedComponent->GetNetID());
-                    pReplicatedComponent->NetworkSerializeForClient(relayMsg, pTargetClient->m_uiClientID, false);
-                    relayMsg.SetChannelType(pReplicatedComponent->GetChannelType());
-                    m_BandwidthManager.RecordBytesSent(relayMsg.m_uiLength);
-                    m_pPeer->SendMessages(relayMsg, pTargetClient->m_Connection);
-                  }
-                }
-                else
-                {
-                  plNetworkMessage relayMsg = m_pPeer->BeginSendMessage();
-                  WriteReplicationHeader(relayMsg, m_uiServerClientID, pReplicatedComponent->GetNetID());
-                  pReplicatedComponent->NetworkSerialize(relayMsg);
-                  relayMsg.SetChannelType(pReplicatedComponent->GetChannelType());
-                  m_BandwidthManager.RecordBytesSent(relayMsg.m_uiLength * connections.GetCount());
-                  m_pPeer->SendMessages(relayMsg, connections);
-                }
-              }
-            }
-
-            for (plNetworkObject* pNetObject : m_NetworkObjects)
-            {
-              if (msgData.m_uiUUID == pNetObject->GetNetID())
-              {
-                pNetObject->OnNetworkMessage(event.m_Message);
-              }
-            }
-
+            HandleReplicationMessage(event.m_Message, msgData.m_uiUUID, senderClientID);
             break;
           }
           case plNetworkMessageIDs::Disconnect:
@@ -906,7 +810,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
                 response.WriteUInt8(1); // Success
                 response.WriteUInt32(pReconnectClient->m_uiClientID);
                 response.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-                m_pPeer->SendMessages(response, event.m_Sender);
+                m_pPeer->SendTo(response, event.m_Sender).IgnoreResult();
                 
                 // Sync state to reconnected client
                 SyncComponentStatesToClient(pReconnectClient);
@@ -921,7 +825,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
                 response.WriteUInt8(0); // Failure
                 response.WriteUInt32(0); // No client ID
                 response.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-                m_pPeer->SendMessages(response, event.m_Sender);
+                m_pPeer->SendTo(response, event.m_Sender).IgnoreResult();
               }
             }
             break;
@@ -1046,99 +950,15 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
     return;
 
   // Dirty replication is gated by network tick rate; transport pump runs every frame.
-  const bool bReplicationTick = m_fNetworkTickRate <= 0.0f ||
-    (timeNow.AsFloatInSeconds() - m_LastUpdate.AsFloatInSeconds() >= minDelta);
-
-  if (bReplicationTick)
+  if (IsReplicationTick(timeNow))
   {
-    m_LastUpdate = timeNow;
-
     if (IsServer() || IsHost())
     {
       RecordLagCompensationSnapshots();
     }
 
-  for (plNetworkComponent* pComponent : m_NetworkComponents)
-  {
-    if (pComponent->NeedReplication())
-    {
-      // Determine if we should send based on our role and the component's network role
-      bool bShouldSend = false;
-      plNetworkRoleEnum::Enum compRole = pComponent->GetNetworkRole();
-      
-      if (IsServer() || IsHost())
-      {
-        // Server/Host sends for Server, Host, or Both roles
-        bShouldSend = (compRole == plNetworkRoleEnum::Server || 
-                       compRole == plNetworkRoleEnum::Host || 
-                       compRole == plNetworkRoleEnum::Both);
-      }
-      else if (IsClient())
-      {
-        // Client sends for Client or Both roles
-        bShouldSend = (compRole == plNetworkRoleEnum::Client || 
-                       compRole == plNetworkRoleEnum::Both);
-      }
-      
-      if (!bShouldSend)
-      {
-        continue;
-      }
-
-      // Check if bandwidth manager allows this update
-      if (!m_BandwidthManager.ShouldSendUpdate(pComponent->GetNetID()))
-      {
-        continue; // Skip this update, will try again next tick
-      }
-
-      if (IsClient())
-      {
-        plNetworkMessage msg = m_pPeer->BeginSendMessage();
-        WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
-        pComponent->NetworkSerializeForClient(msg, m_uiServerClientID, false);
-        msg.SetChannelType(pComponent->GetChannelType());
-        m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-        m_pPeer->SendMessages(msg);
-      }
-      else
-      {
-        if (pComponent->RequiresPerRecipientSerialization())
-        {
-          for (plNetworkClient* pTargetClient : m_pClients)
-          {
-            if (!pTargetClient || pTargetClient->m_ConnectionState != plNetworkConnectionState::Connected)
-              continue;
-
-            plNetworkMessage msg = m_pPeer->BeginSendMessage();
-            WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
-            pComponent->NetworkSerializeForClient(msg, pTargetClient->m_uiClientID, false);
-            msg.SetChannelType(pComponent->GetChannelType());
-            m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-            m_pPeer->SendMessages(msg, pTargetClient->m_Connection);
-          }
-        }
-        else
-        {
-          plDynamicArray<plNetworkConnection> connections;
-          GetTargets(connections);
-          if (connections.GetCount() > 0)
-          {
-            plNetworkMessage msg = m_pPeer->BeginSendMessage();
-            WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
-            pComponent->NetworkSerialize(msg);
-            msg.SetChannelType(pComponent->GetChannelType());
-            m_BandwidthManager.RecordBytesSent(msg.m_uiLength * connections.GetCount());
-            m_pPeer->SendMessages(msg, connections);
-          }
-        }
-      }
-      
-      // Clear the dirty flag after successfully sending
-      pComponent->ClearDirty();
-      m_BandwidthManager.MarkUpdateSent(pComponent->GetNetID());
-    }
+    ReplicateDirtyComponents();
   }
-  } // bReplicationTick
 
   // Check for inactive client timeouts (server only)
   if (IsServer() || IsHost())
@@ -1151,6 +971,240 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
 
   // Draw debug HUD (gated internally by the Networking.DrawInfo CVar)
   LogInfo();
+}
+
+void plNetworkWorldModule::HandleReplicationMessage(plNetworkMessage& msg, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID)
+{
+  plNetworkComponent* pComponent = FindNetworkComponent(uiComponentNetID);
+
+  if (pComponent == nullptr)
+  {
+    for (plNetworkObject* pNetObject : m_NetworkObjects)
+    {
+      if (uiComponentNetID == pNetObject->GetNetID())
+      {
+        pNetObject->OnNetworkMessage(msg);
+        return;
+      }
+    }
+  }
+
+  // A client gets state for a component that has not started yet: a spawned one, or one in a level still loading.
+  if (pComponent == nullptr || m_HeldMessages.Contains(uiComponentNetID))
+  {
+    if (IsClient() && uiSenderClientID == m_uiServerClientID)
+      HoldMessage(HeldMessage::Kind::State, uiComponentNetID, uiSenderClientID, plArrayPtr<const plUInt8>(msg.m_pBuffer + msg.m_uiPosition, msg.GetRemainingBytes()));
+    else
+      plLog::Warning("PL Net: Rejected state update from client {} for unknown component {}", uiSenderClientID, uiComponentNetID);
+
+    msg.m_uiPosition = msg.m_uiLength;
+    return;
+  }
+
+  if (!ValidateStateUpdate(uiComponentNetID, uiSenderClientID))
+  {
+    plLog::Warning("PL Net: Rejected unauthorized state update from client {} for component {}", uiSenderClientID, uiComponentNetID);
+    msg.m_uiPosition = msg.m_uiLength;
+    return;
+  }
+
+  const plUInt32 uiPayloadStart = msg.m_uiPosition;
+  pComponent->NetworkDeserialize(msg);
+  if (msg.HasReadError() || m_bStopRequested)
+    return;
+
+  // An owner's upload reaches only the server; the others get what the owner sent, not the server's copy of it, which
+  // may still be blending towards the received value.
+  if (!IsClient() && uiSenderClientID != m_uiServerClientID)
+    RelayComponentState(pComponent, uiSenderClientID, plArrayPtr<const plUInt8>(msg.m_pBuffer + uiPayloadStart, msg.m_uiLength - uiPayloadStart));
+}
+
+void plNetworkWorldModule::RelayComponentState(plNetworkComponent* pComponent, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> payload)
+{
+  plHybridArray<plNetworkClient*, 32> clients;
+  GetConnectedClients(clients);
+
+  for (plNetworkClient* pClient : clients)
+  {
+    if (pClient->m_uiClientID == uiSenderClientID)
+      continue;
+
+    plNetworkMessage received(const_cast<plUInt8*>(payload.GetPtr()), 0, payload.GetCount(), payload.GetCount(), 0);
+    plNetworkMessage relay = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(relay, m_uiServerClientID, pComponent->GetNetID());
+    pComponent->NetworkRelayForClient(received, relay, pClient->m_uiClientID);
+    relay.SetChannelType(pComponent->GetChannelType());
+    m_BandwidthManager.RecordBytesSent(relay.m_uiLength);
+    m_pPeer->SendTo(relay, pClient->m_Connection).IgnoreResult();
+  }
+}
+
+void plNetworkWorldModule::HoldMessage(HeldMessage::Kind kind, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> data)
+{
+  if (m_uiHeldBytes + data.GetCount() > MaxHeldBytes)
+  {
+    plLog::Warning("PL Net: Dropping a message for component {}: {} bytes are already waiting for components to start", uiComponentNetID, m_uiHeldBytes);
+    return;
+  }
+
+  HeldMessage& held = m_HeldMessages[uiComponentNetID].ExpandAndGetRef();
+  held.m_Kind = kind;
+  held.m_uiSender = uiSenderClientID;
+  held.m_Received = plNetworkClock::Now();
+  held.m_Data = data;
+  m_uiHeldBytes += data.GetCount();
+
+  // The component may have started since the last update; its held messages are then due now.
+  if (FindNetworkComponent(uiComponentNetID) != nullptr && !m_HeldReady.Contains(uiComponentNetID))
+    m_HeldReady.PushBack(uiComponentNetID);
+}
+
+void plNetworkWorldModule::HoldStateForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> state)
+{
+  HoldMessage(HeldMessage::Kind::State, uiComponentNetID, uiSenderClientID, state);
+}
+
+void plNetworkWorldModule::HoldRpcForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> rpc)
+{
+  HoldMessage(HeldMessage::Kind::Rpc, uiComponentNetID, uiSenderClientID, rpc);
+}
+
+void plNetworkWorldModule::ReleaseHeldMessages()
+{
+  // Components that started since the last update get what arrived for them, in the order it arrived.
+  while (!m_HeldReady.IsEmpty() && !m_bStopRequested)
+  {
+    const plUInt32 uiComponentNetID = m_HeldReady[0];
+    m_HeldReady.RemoveAtAndCopy(0);
+
+    plDynamicArray<HeldMessage> held;
+    if (!m_HeldMessages.Remove(uiComponentNetID, &held))
+      continue;
+
+    plNetworkComponent* pComponent = FindNetworkComponent(uiComponentNetID);
+    for (HeldMessage& message : held)
+    {
+      m_uiHeldBytes -= message.m_Data.GetCount();
+      if (pComponent == nullptr || m_bStopRequested)
+        continue;
+
+      plNetworkMessage msg(message.m_Data.GetData(), 0, message.m_Data.GetCount(), message.m_Data.GetCount(), 0);
+      if (message.m_Kind == HeldMessage::Kind::Rpc)
+      {
+        m_RpcManager.HandleRpcMessage(msg, message.m_uiSender);
+      }
+      else if (ValidateStateUpdate(uiComponentNetID, message.m_uiSender))
+      {
+        pComponent->NetworkDeserialize(msg);
+      }
+    }
+  }
+
+  // Messages for a component that never started are dropped once they are old.
+  const plTime cutoff = plNetworkClock::Now() - GetMaxHoldTime();
+  for (auto it = m_HeldMessages.GetIterator(); it.IsValid();)
+  {
+    if (!it.Value().IsEmpty() && it.Value()[0].m_Received < cutoff)
+    {
+      for (const HeldMessage& message : it.Value())
+        m_uiHeldBytes -= message.m_Data.GetCount();
+
+      plLog::Dev("PL Net: Dropped {} messages for component {}, which did not start in time", it.Value().GetCount(), it.Key());
+      it = m_HeldMessages.Remove(it);
+    }
+    else
+    {
+      ++it;
+    }
+  }
+}
+
+bool plNetworkWorldModule::IsHoldingMessagesFor(plUInt32 uiComponentNetID) const
+{
+  return m_HeldMessages.Contains(uiComponentNetID);
+}
+
+bool plNetworkWorldModule::IsReplicationTick(plTime now)
+{
+  const plTime elapsed = now - m_LastUpdate;
+  m_LastUpdate = now;
+
+  if (m_fNetworkTickRate <= 0.0f)
+    return true;
+
+  // A fixed-step accumulator in plTime: the rate holds at any uptime, and a slow frame catches up one tick at most.
+  const plTime step = plTime::MakeFromSeconds(1.0 / m_fNetworkTickRate);
+  m_ReplicationAccumulator = plMath::Min(m_ReplicationAccumulator + elapsed, step * 2.0);
+  if (m_ReplicationAccumulator < step)
+    return false;
+
+  m_ReplicationAccumulator -= step;
+  return true;
+}
+
+bool plNetworkWorldModule::ShouldSendComponent(plNetworkComponent* pComponent) const
+{
+  // Whoever may write the state sends it: the server for its own state and for objects nobody owns, the owner for
+  // Client-role state, and that owner may be the host.
+  return HasLocalAuthority(pComponent);
+}
+
+plResult plNetworkWorldModule::SendComponentState(plNetworkComponent* pComponent)
+{
+  if (IsClient())
+  {
+    plNetworkMessage msg = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
+    pComponent->NetworkSerializeForClient(msg, m_uiServerClientID, false);
+    msg.SetChannelType(pComponent->GetChannelType());
+    m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
+    return m_pPeer->SendToServer(msg);
+  }
+
+  if (!pComponent->RequiresPerRecipientSerialization())
+  {
+    plNetworkMessage msg = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
+    pComponent->NetworkSerialize(msg);
+    msg.SetChannelType(pComponent->GetChannelType());
+    return SendToConnectedClients(msg);
+  }
+
+  plResult result = PL_SUCCESS;
+  plHybridArray<plNetworkClient*, 32> clients;
+  GetConnectedClients(clients);
+  for (plNetworkClient* pTargetClient : clients)
+  {
+    plNetworkMessage msg = m_pPeer->BeginSendMessage();
+    WriteReplicationHeader(msg, m_uiLocalClientID, pComponent->GetNetID());
+    pComponent->NetworkSerializeForClient(msg, pTargetClient->m_uiClientID, false);
+    msg.SetChannelType(pComponent->GetChannelType());
+    m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
+    if (m_pPeer->SendTo(msg, pTargetClient->m_Connection).Failed())
+      result = PL_FAILURE;
+  }
+
+  return result;
+}
+
+void plNetworkWorldModule::ReplicateDirtyComponents()
+{
+  for (plNetworkComponent* pComponent : m_NetworkComponents)
+  {
+    if (!pComponent->NeedReplication() || !ShouldSendComponent(pComponent))
+      continue;
+
+    // A priority interval that has not passed yet keeps the component dirty for a later tick.
+    if (!m_BandwidthManager.ShouldSendUpdate(pComponent->GetNetID()))
+      continue;
+
+    // A state that could not be sent (it does not fit one message) stays dirty instead of being lost.
+    if (SendComponentState(pComponent).Failed())
+      continue;
+
+    pComponent->ClearDirty();
+    m_BandwidthManager.MarkUpdateSent(pComponent->GetNetID());
+  }
 }
 
 void plNetworkWorldModule::BroadcastNetworkStateChange()
@@ -1275,13 +1329,13 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
   msgReply.WriteUInt32(replyMessage.m_uiClientID);
   msgReply.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_BandwidthManager.RecordBytesSent(msgReply.m_uiLength);
-  m_pPeer->SendMessages(msgReply, event.m_Sender);
+  m_pPeer->SendTo(msgReply, event.m_Sender).IgnoreResult();
 
   if (!replyMessage.m_bSuccess)
   {
     plLog::Warning("Client {0} connection failed", pClient->m_uiClientID);
     pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-    m_pPeer->Disconnect(event.m_Sender);
+    m_pPeer->Disconnect(event.m_Sender, replyMessage.m_Reason);
     pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
   }
   else
@@ -1341,7 +1395,7 @@ void plNetworkWorldModule::HandleHandshakeReply(plNetworkEvent& event, plNetwork
   if (!msgData.m_bSuccess || msgData.m_uiProtocolVersion != NETWORK_PROTOCOL_VERSION || msgData.m_uiClientID == 0)
   {
     plLog::Warning("Server rejected connection");
-    Stop();
+    Stop(msgData.m_bSuccess ? plNetworkDisconnectReason::VersionMismatch : msgData.m_Reason);
     return;
   }
 
@@ -1353,15 +1407,48 @@ void plNetworkWorldModule::HandleHandshakeReply(plNetworkEvent& event, plNetwork
   BroadcastNetworkStateChange();
 }
 
-void plNetworkWorldModule::GetTargets(plDynamicArray<plNetworkConnection>& targets)
+void plNetworkWorldModule::GetConnectedClients(plDynamicArray<plNetworkClient*>& out_clients) const
 {
+  out_clients.Clear();
   for (plNetworkClient* pClient : m_pClients)
   {
-    if (pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
+    if (pClient != nullptr && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
+      out_clients.PushBack(pClient);
   }
+}
+
+void plNetworkWorldModule::GetConnectedTargets(plDynamicArray<plNetworkConnection>& out_targets, plUInt32 uiExcludeClientID) const
+{
+  out_targets.Clear();
+  for (plNetworkClient* pClient : m_pClients)
+  {
+    if (pClient != nullptr && pClient->m_ConnectionState == plNetworkConnectionState::Connected && pClient->m_uiClientID != uiExcludeClientID)
+      out_targets.PushBack(pClient->m_Connection);
+  }
+}
+
+plResult plNetworkWorldModule::SendToConnectedClients(const plNetworkMessage& msg, plUInt32 uiExcludeClientID)
+{
+  if (!m_pPeer || IsClient())
+    return PL_FAILURE;
+
+  plHybridArray<plNetworkConnection, 32> targets;
+  GetConnectedTargets(targets, uiExcludeClientID);
+  m_BandwidthManager.RecordBytesSent(msg.m_uiLength * targets.GetCount());
+  return m_pPeer->SendTo(msg, targets.GetArrayPtr());
+}
+
+plResult plNetworkWorldModule::SendToClient(const plNetworkMessage& msg, plUInt32 uiClientID)
+{
+  if (!m_pPeer || IsClient())
+    return PL_FAILURE;
+
+  plNetworkClient* pClient = GetClient(uiClientID);
+  if (pClient == nullptr || pClient->m_ConnectionState != plNetworkConnectionState::Connected)
+    return PL_FAILURE;
+
+  m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
+  return m_pPeer->SendTo(msg, pClient->m_Connection);
 }
 
 
@@ -1419,7 +1506,7 @@ void plNetworkWorldModule::StopPeer()
   PL_PROFILE_SCOPE("Network Stop Peer");
   if (m_Role == plNetworkRoleEnum::Client)
   {
-    m_pPeer->Disconnect();
+    m_pPeer->Disconnect(m_LastDisconnectReason);
   }
   plNetworkPeer::DestroyPeer(m_pPeer);
   m_pPeer = nullptr;
@@ -1440,7 +1527,7 @@ void plNetworkWorldModule::CheckClientTimeouts()
     float secondsSinceActivity = pClient->GetSecondsSinceLastActivity();
     const bool bAdmitted = pClient->m_ConnectionState == plNetworkConnectionState::Connected;
     const bool bExpiredAdmission = !bAdmitted &&
-      (plTime::Now() - pClient->m_AdmissionStartTime).GetSeconds() > plMath::Max(m_Config.m_fHandshakeTimeoutSeconds, 0.1f);
+      (plNetworkClock::Now() - pClient->m_AdmissionStartTime).GetSeconds() > plMath::Max(m_Config.m_fHandshakeTimeoutSeconds, 0.1f);
     if (pClient->m_ConnectionState == plNetworkConnectionState::Disconnecting ||
         pClient->m_ConnectionState == plNetworkConnectionState::Disconnected || bExpiredAdmission ||
         (bAdmitted && m_fClientTimeoutSeconds > 0.0f && secondsSinceActivity > m_fClientTimeoutSeconds))
@@ -1450,16 +1537,29 @@ void plNetworkWorldModule::CheckClientTimeouts()
 
       // Disconnect the client
       pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-      m_pPeer->Disconnect(pClient->m_Connection);
+      m_pPeer->Disconnect(pClient->m_Connection, plNetworkDisconnectReason::Timeout);
 
-      // Notify and cleanup
       m_pClients.RemoveAtAndCopy(i);
-      if (bAdmitted || pClient->m_bAdmissionNotified)
-        BroadcastClientDisconnected(pClient);
-      pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
-      PL_DEFAULT_DELETE(pClient);
+      RemoveClient(pClient, bAdmitted || pClient->m_bAdmissionNotified);
     }
   }
+}
+
+void plNetworkWorldModule::RemoveClient(plNetworkClient* pClient, bool bNotify)
+{
+  // Everything the session keeps for this client goes with it: its objects, its place in a level load, its records.
+  pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
+  if (bNotify)
+    BroadcastClientDisconnected(pClient);
+
+  if (m_Config.m_bDespawnObjectsOfLeavingClients && !IsClient())
+    m_ObjectManager.DespawnObjectsOwnedBy(pClient->m_uiClientID);
+
+  m_LevelManager.OnClientDisconnected(pClient->m_uiClientID);
+  m_NetworkTime.OnClientDisconnected(pClient->m_uiClientID);
+
+  pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
+  PL_DEFAULT_DELETE(pClient);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1471,69 +1571,61 @@ bool plNetworkWorldModule::HasAuthority(plNetworkComponent* pComponent, plUInt32
   if (!pComponent)
     return false;
 
-  // Server always has authority on server-role components
-  if (uiClientID == m_uiServerClientID)
-  {
-    return pComponent->GetNetworkRole() == plNetworkRoleEnum::Server ||
-           pComponent->GetNetworkRole() == plNetworkRoleEnum::Host ||
-           pComponent->GetNetworkRole() == plNetworkRoleEnum::Both;
-  }
-
-  // Check component's network role
-  plNetworkRoleEnum::Enum role = pComponent->GetNetworkRole();
-
-  switch (role)
+  // Server and Host: only the server writes. Client: only the owner writes, and the server owns what no client owns, so a
+  // host's own objects are written by the host. Both: the server and the owner.
+  switch (pComponent->GetNetworkRole())
   {
     case plNetworkRoleEnum::Server:
     case plNetworkRoleEnum::Host:
-      // Only server can modify server-authoritative components
       return uiClientID == m_uiServerClientID;
 
     case plNetworkRoleEnum::Client:
-      // Check if this client owns this component via ObjectManager
-      {
-        const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
-        // Scene components without explicit ownership cannot grant remote write authority.
-        return pInfo != nullptr && pInfo->m_uiOwnerClientID == uiClientID;
-      }
+      return uiClientID == GetOwnerClientID(pComponent);
 
     case plNetworkRoleEnum::Both:
-      // Both server and owning client can modify
-      {
-        if (uiClientID == m_uiServerClientID)
-          return true;
-
-        const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
-        return pInfo != nullptr && pInfo->m_uiOwnerClientID == uiClientID;
-      }
+      return uiClientID == m_uiServerClientID || uiClientID == GetOwnerClientID(pComponent);
 
     default:
       return false;
   }
 }
 
+plUInt32 plNetworkWorldModule::GetOwnerClientID(const plNetworkComponent* pComponent) const
+{
+  const plNetworkObjectInfo* pInfo = FindOwningObject(pComponent);
+  return pInfo != nullptr ? pInfo->m_uiOwnerClientID : m_uiServerClientID;
+}
+
 bool plNetworkWorldModule::HasLocalAuthority(plNetworkComponent* pComponent) const
 {
+  // A client in its handshake has no client ID yet; its placeholder 0 is the server's.
+  if (IsClient() && !IsConnected())
+    return false;
+
   return HasAuthority(pComponent, m_uiLocalClientID);
 }
 
 plNetworkComponent* plNetworkWorldModule::FindNetworkComponent(plUInt32 uiComponentNetID) const
 {
   plNetworkComponent* pResult = nullptr;
-  for (plNetworkComponent* pComponent : m_NetworkComponents)
-  {
-    if (pComponent->GetNetID() != uiComponentNetID)
-      continue;
-    if (pResult != nullptr)
-      return nullptr; // Ambiguous identities must fail closed.
-    pResult = pComponent;
-  }
+  m_ComponentsByNetID.TryGetValue(uiComponentNetID, pResult);
   return pResult;
 }
 
 const plNetworkObjectInfo* plNetworkWorldModule::FindOwningObject(const plNetworkComponent* pComponent) const
 {
-  for (const plGameObject* pObject = pComponent ? pComponent->GetOwner() : nullptr; pObject; pObject = pObject->GetParent())
+  if (pComponent == nullptr)
+    return nullptr;
+
+  // A spawned component names its object in its NetID.
+  if (const plUInt32 uiObjectID = plNetworkObjectManager::GetObjectNetID(pComponent->GetNetID()))
+  {
+    if (const plNetworkObjectInfo* pInfo = m_ObjectManager.GetObjectInfo(uiObjectID))
+      return pInfo;
+  }
+
+  // A scene object can be given an owner as a whole, which its children share.
+  for (const plGameObject* pObject = pComponent->GetOwner(); pObject; pObject = pObject->GetParent())
   {
     const plUInt32 uiObjectID = m_ObjectManager.GetNetworkID(pObject->GetHandle());
     if (uiObjectID != 0)
@@ -1624,14 +1716,13 @@ void plNetworkWorldModule::SyncComponentStatesToClient(plNetworkClient* pClient)
 
   for (plNetworkComponent* pComponent : m_NetworkComponents)
   {
-    // Only sync server-authoritative components
-    plNetworkRoleEnum::Enum role = pComponent->GetNetworkRole();
-    if (role == plNetworkRoleEnum::Server ||
-        role == plNetworkRoleEnum::Host ||
-        role == plNetworkRoleEnum::Both)
-    {
+    // Spawned components carry their state in the spawn message.
+    if (plNetworkObjectManager::GetObjectNetID(pComponent->GetNetID()) != 0)
+      continue;
+
+    // The server holds the latest state of every role, owner uploads included.
+    if (pComponent->GetNetworkRole() != plNetworkRoleEnum::Undefined)
       SyncComponentStateToClient(pComponent, pClient);
-    }
   }
 }
 
@@ -1647,8 +1738,7 @@ void plNetworkWorldModule::SyncComponentStateToClient(plNetworkComponent* pCompo
   pComponent->NetworkSerializeForClient(msg, pClient->m_uiClientID, true);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-  m_pPeer->SendMessages(msg, pClient->m_Connection);
+  SendToClient(msg, pClient->m_uiClientID).IgnoreResult();
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1666,7 +1756,7 @@ void plNetworkWorldModule::SendDisconnect(plNetworkDisconnectReason::Enum reason
   msg.WriteUInt8(static_cast<plUInt8>(reason));
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-  m_pPeer->SendMessages(msg);
+  m_pPeer->SendToServer(msg).IgnoreResult();
 
   plLog::Dev("PL Net: Sent disconnect (reason: {})", static_cast<plUInt8>(reason));
 }
@@ -1676,19 +1766,12 @@ void plNetworkWorldModule::BroadcastDisconnect(plNetworkDisconnectReason::Enum r
   if (!m_pPeer || (!IsHost() && !IsServer()))
     return;
 
-  for (plNetworkClient* pClient : m_pClients)
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      plNetworkMessage msg = m_pPeer->BeginSendMessage();
-      msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::Disconnect));
-      msg.WriteUInt32(m_uiServerClientID);
-      msg.WriteUInt8(static_cast<plUInt8>(reason));
-      msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-      m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-      m_pPeer->SendMessages(msg, pClient->m_Connection);
-    }
-  }
+  plNetworkMessage msg = m_pPeer->BeginSendMessage();
+  msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::Disconnect));
+  msg.WriteUInt32(m_uiServerClientID);
+  msg.WriteUInt8(static_cast<plUInt8>(reason));
+  msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
+  SendToConnectedClients(msg).IgnoreResult();
 
   plLog::Dev("PL Net: Broadcast disconnect to all clients (reason: {})", static_cast<plUInt8>(reason));
 }
@@ -1715,13 +1798,12 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
   msg.WriteUInt8(static_cast<plUInt8>(reason));
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_BandwidthManager.RecordBytesSent(msg.m_uiLength);
-  m_pPeer->SendMessages(msg, pClient->m_Connection);
+  m_pPeer->SendTo(msg, pClient->m_Connection).IgnoreResult();
 
-  // Flush the reason if possible, then close immediately. Admission state is revoked before
+  // Disconnect sends what is queued, the reason included, before it closes. Admission state is revoked before
   // any subsequent event; the record is reclaimed after dispatch, not while it is in use.
   pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-  m_pPeer->Update(0.0f);
-  m_pPeer->Disconnect(pClient->m_Connection);
+  m_pPeer->Disconnect(pClient->m_Connection, reason);
   pClient->m_bReservedForReconnect = false;
 }
 
@@ -1731,11 +1813,12 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
 
 bool plNetworkWorldModule::CheckRateLimit(plNetworkClient* pClient)
 {
-  if (!pClient || m_uiRateLimitPerSecond == 0)
-    return true; // No rate limiting
+  // The limit protects a server from its clients; a client takes whatever its server sends.
+  if (!pClient || m_uiRateLimitPerSecond == 0 || IsClient())
+    return true;
 
   // Reset counter each second
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   if ((now - pClient->m_LastRateLimitReset).GetSeconds() >= 1.0)
   {
     pClient->m_fMessagesPerSecond = 0.0f;
@@ -1784,7 +1867,7 @@ void plNetworkWorldModule::RecordProtocolViolation(plNetworkClient* pClient, con
   }
 
   ++pClient->m_uiProtocolViolations;
-  const plTime now = plTime::Now();
+  const plTime now = plNetworkClock::Now();
   if ((now - pClient->m_LastProtocolViolationLog).GetSeconds() >= 1.0)
   {
     plLog::Warning("PL Net: Protocol violation from client {} ({}/{}): {}",
@@ -1821,7 +1904,7 @@ plNetworkClient* plNetworkWorldModule::FindClientBySessionToken(plUInt64 uiSessi
 
 void plNetworkWorldModule::CleanupExpiredReconnectSlots()
 {
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   
   for (plUInt32 i = m_pClients.GetCount(); i > 0; --i)
   {
@@ -1829,9 +1912,8 @@ void plNetworkWorldModule::CleanupExpiredReconnectSlots()
     if (pClient && pClient->m_bReservedForReconnect && now > pClient->m_ReconnectExpiry)
     {
       plLog::Dev("PL Net: Reconnection window expired for client {}", pClient->m_uiClientID);
-      BroadcastClientDisconnected(pClient);
-      PL_DEFAULT_DELETE(pClient);
       m_pClients.RemoveAtAndSwap(i - 1);
+      RemoveClient(pClient, true);
     }
   }
 }

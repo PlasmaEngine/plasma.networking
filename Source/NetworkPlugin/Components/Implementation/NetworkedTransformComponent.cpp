@@ -79,6 +79,9 @@ void plNetworkedTransformComponent::OnSimulationStarted()
 {
   plNetworkComponent::OnSimulationStarted();
 
+  // The owner writes the transform; the server owns, and so simulates, what no client owns.
+  SetNetworkRole(plNetworkRoleEnum::Client);
+
   m_vReplicatedPosition = GetOwner()->GetGlobalPosition();
   m_qReplicatedRotation = GetOwner()->GetGlobalRotation();
   m_vPrevPosition = m_vReplicatedPosition;
@@ -106,15 +109,10 @@ void plNetworkedTransformComponent::Update()
   }
 
   // The owning client simulates an owned object; the host or server simulates everything nobody owns (scene objects).
-  bool bIsLocal = false;
-  if (const plNetworkObjectInfo* pInfo = GetNetID() != 0 ? m_pNetworkModule->FindOwningObject(this) : nullptr)
-  {
-    bIsLocal = pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
-  }
-  else
-  {
-    bIsLocal = m_pNetworkModule->IsHost() || m_pNetworkModule->IsServer();
-  }
+  // A client still in its handshake has no client ID yet and owns nothing.
+  const plUInt32 uiOwner = m_pNetworkModule->GetOwnerClientID(this);
+  const bool bIsLocal = m_pNetworkModule->IsClient() ? m_pNetworkModule->IsConnected() && uiOwner == m_pNetworkModule->GetLocalClientID()
+                                                      : uiOwner == m_pNetworkModule->GetServerClientID();
 
   // One-time authority notification
   if (!m_bAuthorityInitialized && GetNetID() != 0)
@@ -154,7 +152,7 @@ void plNetworkedTransformComponent::UpdateAsAuthority()
   CaptureTransformState();
 
   // Throttle network sends to configured rate
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   double fSendInterval = (m_fSendRate > 0.0f) ? (1000.0 / m_fSendRate) : 50.0;
   if ((now - m_LastSendTime).GetMilliseconds() < fSendInterval)
     return;
@@ -176,7 +174,7 @@ void plNetworkedTransformComponent::UpdateAsRemote()
   // snapshot timestamps (which are also wall-clock based via GetSyncedTime/plTime::Now).
   // Using game clock (GetWorld()->GetClock().GetTimeDiff()) can drift due to
   // fixed timestep, time scaling, or pausing.
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   float frameDt = 0.0f;
   if (m_LastWallClockUpdateTime.GetSeconds() > 0.0)
   {
@@ -252,7 +250,7 @@ void plNetworkedTransformComponent::SendStateToHost()
 
   msg.SetChannelType(plNetworkChannelTypeEnum::UnreliableOrdered);
   msg.SetPriority(plNetworkPriority::High);
-  m_pNetworkModule->GetPeer()->SendMessages(msg);
+  m_pNetworkModule->GetPeer()->SendToServer(msg).IgnoreResult();
 }
 
 void plNetworkedTransformComponent::BroadcastStateToClients(bool bIncludeOwner)
@@ -260,33 +258,14 @@ void plNetworkedTransformComponent::BroadcastStateToClients(bool bIncludeOwner)
   if (!m_pNetworkModule || !m_pNetworkModule->GetPeer())
     return;
 
-  plUInt32 uiOwnerClientID = 0;
-  if (const plNetworkObjectInfo* pInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(GetNetID()))
-  {
-    uiOwnerClientID = pInfo->m_uiOwnerClientID;
-  }
-
-  auto& clients = m_pNetworkModule->GetClients();
-  plDynamicArray<plNetworkConnection> connections;
-  for (auto* pClient : clients)
-  {
-    if (pClient->m_uiClientID == m_pNetworkModule->GetLocalClientID())
-      continue;
-
-    if (!bIncludeOwner && pClient->m_uiClientID == uiOwnerClientID)
-      continue;
-
-    connections.PushBack(pClient->m_Connection);
-  }
-  if (connections.IsEmpty())
-    return;
+  const plUInt32 uiExcludeClientID = bIncludeOwner ? plInvalidIndex : m_pNetworkModule->GetOwnerClientID(this);
 
   plNetworkMessage msg = m_pNetworkModule->GetPeer()->BeginSendMessage();
   WriteTransformState(msg);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::UnreliableOrdered);
   msg.SetPriority(plNetworkPriority::High);
-  m_pNetworkModule->GetPeer()->SendMessages(msg, connections);
+  m_pNetworkModule->SendToConnectedClients(msg, uiExcludeClientID).IgnoreResult();
 }
 
 void plNetworkedTransformComponent::HandleTransformStateMessage(plNetworkMessage& msg)
@@ -323,11 +302,11 @@ void plNetworkedTransformComponent::HandleTransformStateMessage(plNetworkMessage
     t.m_qRotation = qRot;
     t.m_vScale.Set(1.0f);
 
-    m_Interpolator.AddSnapshot(t, vVel, serverSendTime, plTime::Now(), ++m_uiSnapshotSequence);
+    m_Interpolator.AddSnapshot(t, vVel, serverSendTime, plNetworkClock::Now(), ++m_uiSnapshotSequence);
   }
 
-  // Host: relay client-uploaded state to other clients (exclude owner; they already have it).
-  if (m_pNetworkModule && m_pNetworkModule->IsHost())
+  // A host or dedicated server relays the owner's upload to everyone else.
+  if (m_pNetworkModule && !m_pNetworkModule->IsClient())
   {
     BroadcastStateToClients(false);
   }

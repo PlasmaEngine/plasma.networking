@@ -126,6 +126,19 @@ public:
   plNetworkClient* GetClient(plUInt32 uiClientID);
   plNetworkClient* GetClient(const plNetworkConnection& connection);
 
+  /// @brief The clients that completed the handshake. Every message a server sends goes to these only; a client still
+  /// in admission would take any other message as a protocol violation.
+  void GetConnectedClients(plDynamicArray<plNetworkClient*>& out_clients) const;
+
+  /// @brief Connections of the admitted clients, without uiExcludeClientID.
+  void GetConnectedTargets(plDynamicArray<plNetworkConnection>& out_targets, plUInt32 uiExcludeClientID = plInvalidIndex) const;
+
+  /// @brief Server side: sends to every admitted client except uiExcludeClientID.
+  plResult SendToConnectedClients(const plNetworkMessage& msg, plUInt32 uiExcludeClientID = plInvalidIndex);
+
+  /// @brief Server side: sends to one client if it is admitted.
+  plResult SendToClient(const plNetworkMessage& msg, plUInt32 uiClientID);
+
   bool StartServer();
   bool StartClient();
   bool StartHost();
@@ -194,7 +207,25 @@ public:
   /// @brief Validate that an incoming state update is authorized
   bool ValidateStateUpdate(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID) const;
   plNetworkComponent* FindNetworkComponent(plUInt32 uiComponentNetID) const;
+
+  /// @brief The spawned object a component belongs to, or the owned scene object above it; null when nobody owns it.
   const plNetworkObjectInfo* FindOwningObject(const plNetworkComponent* pComponent) const;
+
+  /// @brief The client that owns the component's object; the server when nobody does.
+  plUInt32 GetOwnerClientID(const plNetworkComponent* pComponent) const;
+
+  //////////////////////////////////////////////////////////////////////////
+  // Messages for components that have not started
+  //////////////////////////////////////////////////////////////////////////
+
+  /// @brief Client side: keeps a state payload until the component with this NetID starts, then applies it.
+  void HoldStateForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> state);
+
+  /// @brief Client side: keeps an RPC (from its RPC ID on) until the component with this NetID starts, then runs it.
+  void HoldRpcForComponent(plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> rpc);
+
+  /// @brief True while messages wait for this component; newer ones then wait behind them.
+  bool IsHoldingMessagesFor(plUInt32 uiComponentNetID) const;
 
   //////////////////////////////////////////////////////////////////////////
   // Late-Joiner Synchronization
@@ -212,6 +243,9 @@ public:
 
   /// @brief Stop with a specific disconnect reason
   void Stop(plNetworkDisconnectReason::Enum reason = plNetworkDisconnectReason::ClientQuit);
+
+  /// @brief Why the last session of this module ended.
+  PL_NODISCARD plNetworkDisconnectReason::Enum GetLastDisconnectReason() const { return m_LastDisconnectReason; }
 
   /// @brief Kick a client with a reason
   void KickClient(plUInt32 uiClientID, plNetworkDisconnectReason::Enum reason = plNetworkDisconnectReason::Kicked);
@@ -254,10 +288,39 @@ private:
   void BroadcastClientConnected(plNetworkClient* pClient);
   void BroadcastClientDisconnected(plNetworkClient* pClient);
 
+  struct HeldMessage
+  {
+    enum class Kind : plUInt8
+    {
+      State,
+      Rpc,
+    };
+
+    Kind m_Kind = Kind::State;
+    plUInt32 m_uiSender = 0;
+    plTime m_Received;
+    plDynamicArray<plUInt8> m_Data;
+  };
+
+  static constexpr plUInt32 MaxHeldBytes = 256 * 1024;
+  static plTime GetMaxHoldTime() { return plTime::MakeFromSeconds(10); }
+
+  void HandleReplicationMessage(plNetworkMessage& msg, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID);
+  void RelayComponentState(plNetworkComponent* pComponent, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> payload);
+  void HoldMessage(HeldMessage::Kind kind, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> data);
+  void ReleaseHeldMessages();
+
+  /// @brief Server side: everything that goes when a client leaves, for every way it can leave. Deletes the record.
+  void RemoveClient(plNetworkClient* pClient, bool bNotify);
+
+  bool IsReplicationTick(plTime now);
+  bool ShouldSendComponent(plNetworkComponent* pComponent) const;
+  plResult SendComponentState(plNetworkComponent* pComponent);
+  void ReplicateDirtyComponents();
+
   void HandleHandshake(plNetworkEvent& event, plNetworkClient* pClient);
   void HandleHandshakeReply(plNetworkEvent& event, plNetworkClient* pClient);
 
-  void GetTargets(plDynamicArray<plNetworkConnection>& targets);
 
   bool StartPeer();
   void StopPeer();
@@ -288,7 +351,9 @@ private:
   bool m_bUpdating = false;
   bool m_bStopping = false;
   bool m_bStopRequested = false;
+  bool m_bDestroying = false; ///< The world is going away: Stop() leaves its objects to it.
   plNetworkDisconnectReason::Enum m_DeferredStopReason = plNetworkDisconnectReason::ClientQuit;
+  plNetworkDisconnectReason::Enum m_LastDisconnectReason = plNetworkDisconnectReason::Unknown;
   plEnum<plNetworkRoleEnum> m_Role = plNetworkRoleEnum::Undefined;
   plEnum<plNetworkConnectionState> m_Status = plNetworkConnectionState::Disconnected;
   plUInt32 m_uiServerClientID = 0;
@@ -298,6 +363,7 @@ private:
   plNetworkClient* m_pLocalClient = nullptr;
   plDynamicArray<plNetworkClient*> m_pClients;
   plTime m_LastUpdate;
+  plTime m_ReplicationAccumulator;
   plUInt32 m_uiGameVersion = 0;
 
   /// @brief Rate limiting configuration
@@ -310,7 +376,12 @@ private:
   plUInt64 m_uiNextSessionToken = 1;           ///< Counter for session tokens
 
   plDynamicArray<plNetworkComponent*> m_NetworkComponents;
+  plHashTable<plUInt32, plNetworkComponent*> m_ComponentsByNetID;
   plDynamicArray<plNetworkObject*> m_NetworkObjects;
+
+  plHashTable<plUInt32, plDynamicArray<HeldMessage>> m_HeldMessages;
+  plDynamicArray<plUInt32> m_HeldReady; ///< Components that started and have held messages, in the order they started.
+  plUInt32 m_uiHeldBytes = 0;
 
   /// @brief Object manager for spawn/despawn
   plNetworkObjectManager m_ObjectManager;

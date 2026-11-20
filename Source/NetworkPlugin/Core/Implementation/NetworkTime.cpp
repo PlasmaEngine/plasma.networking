@@ -4,6 +4,8 @@
 #include <NetworkPlugin/Core/NetworkPeer.h>
 #include <NetworkPlugin/WorldModule/NetworkWorldModule.h>
 
+plTime plNetworkClock::s_Offset;
+
 plNetworkTime::plNetworkTime()
   : m_SyncInterval(plTime::MakeFromSeconds(5.0))
   , m_ServerOffset(plTime::MakeZero())
@@ -61,7 +63,7 @@ void plNetworkTime::Update()
   if (!m_pNetworkModule->IsClient())
     return;
 
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
 
   // Check if we need to send a sync request
   if (!m_bSyncPending)
@@ -90,16 +92,16 @@ void plNetworkTime::Update()
 plTime plNetworkTime::GetNetworkTime() const
 {
   if (!m_pNetworkModule)
-    return plTime::Now();
+    return plNetworkClock::Now();
 
   // Server/Host: local time IS network time
   if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
   {
-    return plTime::Now();
+    return plNetworkClock::Now();
   }
 
   // Client: apply offset to get estimated server time
-  return plTime::Now() - m_ServerOffset;
+  return plNetworkClock::Now() - m_ServerOffset;
 }
 
 void plNetworkTime::RequestSync()
@@ -125,11 +127,11 @@ void plNetworkTime::SendSyncRequest()
   msg.WriteUInt16(m_uiPendingSyncSequence);
   
   // Write our local time when sending the request
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   msg.WriteDouble(now.GetSeconds());
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg);
+  pPeer->SendToServer(msg).IgnoreResult();
 
   m_PendingSyncRequestTime = now;
   m_bSyncPending = true;
@@ -149,21 +151,21 @@ void plNetworkTime::HandleTimeSyncRequest(plNetworkMessage& msg, plUInt32 uiClie
     return;
 
   // T1: server receive time (record immediately so transform traffic cannot inflate this)
-  const plTime serverReceiveTime = plTime::Now();
+  const plTime serverReceiveTime = plNetworkClock::Now();
 
   // Send response to the specific client
   plNetworkClient* pClient = m_pNetworkModule->GetClient(uiClientID);
   if (!pClient)
     return;
 
-  const plTime now = plTime::Now();
+  const plTime now = plNetworkClock::Now();
   auto itLastResponse = m_LastServerResponseByClient.Find(uiClientID);
   if (itLastResponse.IsValid() && now - itLastResponse.Value() < plTime::MakeFromMilliseconds(200.0))
     return;
   m_LastServerResponseByClient[uiClientID] = now;
 
   // T2: server send time
-  const plTime serverSendTime = plTime::Now();
+  const plTime serverSendTime = plNetworkClock::Now();
 
   plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
   plNetworkMessage response = pPeer->BeginSendMessage();
@@ -175,7 +177,7 @@ void plNetworkTime::HandleTimeSyncRequest(plNetworkMessage& msg, plUInt32 uiClie
   response.WriteDouble(serverSendTime.GetSeconds());
 
   response.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(response, pClient->m_Connection);
+  m_pNetworkModule->SendToClient(response, uiClientID).IgnoreResult();
 }
 
 void plNetworkTime::HandleTimeSyncResponse(plNetworkMessage& msg)
@@ -186,7 +188,7 @@ void plNetworkTime::HandleTimeSyncResponse(plNetworkMessage& msg)
     return;
   }
 
-  const plTime t3ResponseReceived = plTime::Now();
+  const plTime t3ResponseReceived = plNetworkClock::Now();
 
   const plUInt16 uiSequence = msg.ReadUInt16();
 

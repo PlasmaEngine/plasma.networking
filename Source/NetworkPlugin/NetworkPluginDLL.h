@@ -17,4 +17,4 @@
 
 #include <NetworkPlugin/Core/NetworkTypes.h>
 
-#define NETWORK_PROTOCOL_VERSION 3
+#define NETWORK_PROTOCOL_VERSION 4

@@ -105,7 +105,7 @@ PL_CREATE_SIMPLE_TEST(Network, AdmissionAndLifetime)
     if (host.m_pModule->GetClients().IsEmpty()) return;
     plNetworkMessage msg = host.m_pModule->GetPeer()->BeginSendMessage();
     msg.WriteUInt8(plNetworkMessageIDs::Handshake);
-    host.m_pModule->GetPeer()->SendMessages(msg, host.m_pModule->GetClients()[0]->m_Connection);
+    host.m_pModule->GetPeer()->SendTo(msg, host.m_pModule->GetClients()[0]->m_Connection).IgnoreResult();
     PL_TEST_BOOL(PumpUntil(host, &client, nullptr, [&] { return client.m_pModule->GetPeer() == nullptr; }));
   }
 }
@@ -171,7 +171,8 @@ PL_CREATE_SIMPLE_TEST(Network, AuthorityAndRpc)
       msg.WriteUInt32(rpc->m_uiRpcID); msg.WriteUInt32(component->GetNetID()); msg.WriteUInt8(1);
       msg.WriteUInt8(type); msg.WriteUInt32(42); msg.m_uiPosition = 0;
       module->GetRpcManager()->HandleRpcMessage(msg, 0);
-      PL_TEST_BOOL(msg.HasReadError() == (type == plVariantType::Float));
+      // A well-formed float where the function takes an int is dropped, not treated as malformed.
+      PL_TEST_BOOL(!msg.HasReadError());
     }
     PL_TEST_INT(component->m_uiCalls, 1);
     PL_TEST_INT(component->m_uiValue, 42);

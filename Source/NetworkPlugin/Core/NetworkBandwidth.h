@@ -8,6 +8,7 @@
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Containers/StaticArray.h>
 #include <Foundation/Time/Time.h>
+#include <NetworkPlugin/Core/NetworkTime.h>
 
 class plNetworkWorldModule;
 class plNetworkComponent;
@@ -46,11 +47,13 @@ struct PL_NETWORKPLUGIN_DLL plNetworkBandwidthConfig
   /// @brief Minimum update interval for low-priority components (seconds)
   float m_fMinUpdateIntervalLow = 0.5f;
 
-  /// @brief Minimum update interval for normal-priority components (seconds)
-  float m_fMinUpdateIntervalNormal = 0.1f;
+  /// @brief Minimum update interval for normal-priority components (seconds). Normal is the default priority, so it adds
+  /// no limit: the component's own send rate and the network tick decide.
+  float m_fMinUpdateIntervalNormal = 0.0f;
 
-  /// @brief Minimum update interval for high-priority components (seconds)
-  float m_fMinUpdateIntervalHigh = 0.033f;
+  /// @brief Minimum update interval for high-priority components (seconds). A higher priority never sends less often than
+  /// Normal.
+  float m_fMinUpdateIntervalHigh = 0.0f;
 
   /// @brief Distance threshold for position delta (below this, don't send)
   float m_fPositionDeltaThreshold = 0.01f;
@@ -83,7 +86,7 @@ struct PL_NETWORKPLUGIN_DLL plQueuedNetworkUpdate
   /// @brief Calculate effective priority (lower = more important)
   float GetEffectivePriority() const
   {
-    float timeFactor = (plTime::Now() - m_QueueTime).AsFloatInSeconds();
+    float timeFactor = (plNetworkClock::Now() - m_QueueTime).AsFloatInSeconds();
     return static_cast<float>(m_Priority) - timeFactor * 0.1f - m_fRelevancy;
   }
 
@@ -139,6 +142,9 @@ public:
 
   /// @brief Get the priority for a component
   plNetworkPriority::Enum GetComponentPriority(plUInt32 uiNetworkID) const;
+
+  /// @brief Forgets what is recorded for a component that stopped replicating.
+  void RemoveComponentState(plUInt32 uiNetworkID) { m_ComponentStates.Remove(uiNetworkID); }
 
   /// @brief Queue a component update for priority-based sending
   void QueueUpdate(plNetworkComponent* pComponent, plUInt32 uiEstimatedSize);
@@ -201,6 +207,8 @@ public:
   void DrawDebugStats(plWorld* pWorld);
 
 private:
+  friend class plNetworkTestAccess;
+
   /// @brief Draw the bandwidth history graph
   void DrawBandwidthGraph(plWorld* pWorld);
 

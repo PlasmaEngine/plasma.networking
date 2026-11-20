@@ -34,7 +34,11 @@ public:
   plNetworkedBlackboardComponent();
   virtual ~plNetworkedBlackboardComponent() = default;
 
+  void SerializeComponent(plWorldWriter& inout_stream) const override;
+  void DeserializeComponent(plWorldReader& inout_stream) override;
+
   virtual void NetworkSerialize(plNetworkMessage& msg) override;
+  virtual void NetworkSerializeForClient(plNetworkMessage& msg, plUInt32 uiRecipientClientID, bool bInitialSync) override;
   virtual void NetworkDeserialize(plNetworkMessage& msg) override;
   virtual void OnNetworkStateChanged(plNetworkConnectionState::Enum state) override;
 
@@ -44,6 +48,7 @@ protected:
 
 private:
   void ResolveBlackboard();
+  void WriteEntries(plNetworkMessage& msg, bool bFullSnapshot) const;
   bool HasReplicationAuthority() const;
   bool ShouldReplicateEntry(const plBlackboard::Entry& entry) const;
   bool HasEntryChanges() const;
@@ -64,5 +69,4 @@ private:
   bool m_bLoggedMissingBoard = false;
 
   /// Spawned objects assign the same NetID to every plNetworkComponent on the owner; we derive a unique ID for routing.
-  plUInt32 m_uiOwnerObjectNetID = 0;
 };

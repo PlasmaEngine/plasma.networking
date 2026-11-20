@@ -35,6 +35,49 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plNetworkRpcAttribute, 1, plRTTIDefaultAllocator
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
+namespace
+{
+  /// \brief The variant type an RPC argument of this reflected type travels as; Invalid for types RPCs do not support.
+  plVariantType::Enum GetArgumentVariantType(const plRTTI* pType)
+  {
+    if (pType == plGetStaticRTTI<bool>())
+      return plVariantType::Bool;
+    if (pType == plGetStaticRTTI<plInt8>())
+      return plVariantType::Int8;
+    if (pType == plGetStaticRTTI<plUInt8>())
+      return plVariantType::UInt8;
+    if (pType == plGetStaticRTTI<plInt16>())
+      return plVariantType::Int16;
+    if (pType == plGetStaticRTTI<plUInt16>())
+      return plVariantType::UInt16;
+    if (pType == plGetStaticRTTI<plInt32>())
+      return plVariantType::Int32;
+    if (pType == plGetStaticRTTI<plUInt32>())
+      return plVariantType::UInt32;
+    if (pType == plGetStaticRTTI<plInt64>())
+      return plVariantType::Int64;
+    if (pType == plGetStaticRTTI<plUInt64>())
+      return plVariantType::UInt64;
+    if (pType == plGetStaticRTTI<float>())
+      return plVariantType::Float;
+    if (pType == plGetStaticRTTI<double>())
+      return plVariantType::Double;
+    if (pType == plGetStaticRTTI<plVec2>())
+      return plVariantType::Vector2;
+    if (pType == plGetStaticRTTI<plVec3>())
+      return plVariantType::Vector3;
+    if (pType == plGetStaticRTTI<plVec4>())
+      return plVariantType::Vector4;
+    if (pType == plGetStaticRTTI<plQuat>())
+      return plVariantType::Quaternion;
+    if (pType == plGetStaticRTTI<plString>() || pType == plGetStaticRTTI<plStringView>() || pType == plGetStaticRTTI<const char*>())
+      return plVariantType::String;
+    return plVariantType::Invalid;
+  }
+
+  bool IsStringType(plVariantType::Enum type) { return type == plVariantType::String || type == plVariantType::StringView; }
+} // namespace
+
 plNetworkRpcManager::plNetworkRpcManager()
 {
 }
@@ -69,39 +112,13 @@ void plNetworkRpcManager::RegisterComponentRpcs(const plRTTI* pComponentType)
   if (!pComponentType)
     return;
 
-  // Iterate through all functions on this type
   for (const plAbstractFunctionProperty* pFunction : pComponentType->GetFunctions())
   {
-    // Check for NetworkRpc attribute
     const plNetworkRpcAttribute* pRpcAttr = pFunction->GetAttributeByType<plNetworkRpcAttribute>();
     if (!pRpcAttr)
       continue;
 
-    // Generate or lookup RPC ID
-    plUInt32 rpcID = GenerateRpcID(pComponentType, pFunction->GetPropertyName());
-
-    // Check if already registered
-    if (m_RegisteredRpcs.Contains(rpcID))
-      continue;
-
-    // Register the RPC
-    plNetworkRpcInfo info;
-    info.m_uiRpcID = rpcID;
-    info.m_sFunctionName = pFunction->GetPropertyName();
-    info.m_pComponentType = pComponentType;
-    info.m_pFunction = pFunction;
-    info.m_Target = pRpcAttr->m_Target;
-    info.m_Reliability = pRpcAttr->m_Reliability;
-
-    m_RegisteredRpcs[rpcID] = info;
-
-    // Create lookup key: high 32 bits = type hash, low 32 bits = function name hash
-    plUInt64 lookupKey = (static_cast<plUInt64>(pComponentType->GetTypeNameHash()) << 32) |
-                         plHashingUtils::StringHash(pFunction->GetPropertyName());
-    m_RpcLookup[lookupKey] = rpcID;
-
-    plLog::Dev("PL Net: Registered RPC '{}::{}' with ID {}",
-      pComponentType->GetTypeName(), pFunction->GetPropertyName(), rpcID);
+    RegisterRpcInfo(pComponentType, pFunction, pRpcAttr->m_Target, pRpcAttr->m_Reliability);
   }
 
   // Also check parent types
@@ -120,11 +137,10 @@ void plNetworkRpcManager::RegisterRpc(
   if (!pComponentType)
     return;
 
-  // Find the function property by name
   const plAbstractFunctionProperty* pFunction = nullptr;
   for (const plAbstractFunctionProperty* pFunc : pComponentType->GetFunctions())
   {
-    if (plStringUtils::IsEqual(pFunc->GetPropertyName(), sFunctionName.GetStartPointer()))
+    if (sFunctionName.IsEqual(pFunc->GetPropertyName()))
     {
       pFunction = pFunc;
       break;
@@ -138,10 +154,23 @@ void plNetworkRpcManager::RegisterRpc(
     return;
   }
 
-  plUInt32 rpcID = GenerateRpcID(pComponentType, sFunctionName);
+  RegisterRpcInfo(pComponentType, pFunction, target, reliability);
+}
 
-  if (m_RegisteredRpcs.Contains(rpcID))
+void plNetworkRpcManager::RegisterRpcInfo(const plRTTI* pComponentType, const plAbstractFunctionProperty* pFunction,
+  plNetworkRpcTarget::Enum target, plNetworkRpcReliability::Enum reliability)
+{
+  const plUInt32 rpcID = GenerateRpcID(pComponentType, pFunction->GetPropertyName());
+
+  if (const plNetworkRpcInfo* pExisting = GetRpcInfo(rpcID))
+  {
+    if (pExisting->m_pComponentType != pComponentType || pExisting->m_pFunction != pFunction)
+    {
+      plLog::Error("PL Net: RPC '{}::{}' has the same ID {} as '{}::{}'; rename one of them", pComponentType->GetTypeName(), pFunction->GetPropertyName(),
+        rpcID, pExisting->m_pComponentType->GetTypeName(), pExisting->m_sFunctionName);
+    }
     return;
+  }
 
   plNetworkRpcInfo info;
   info.m_uiRpcID = rpcID;
@@ -150,15 +179,13 @@ void plNetworkRpcManager::RegisterRpc(
   info.m_pFunction = pFunction;
   info.m_Target = target;
   info.m_Reliability = reliability;
-
   m_RegisteredRpcs[rpcID] = info;
 
-  plUInt64 lookupKey = (static_cast<plUInt64>(pComponentType->GetTypeNameHash()) << 32) |
-                       plHashingUtils::StringHash(sFunctionName);
+  // Lookup key: high 32 bits = type hash, low 32 bits = function name hash
+  const plUInt64 lookupKey = (static_cast<plUInt64>(pComponentType->GetTypeNameHash()) << 32) | plHashingUtils::StringHash(pFunction->GetPropertyName());
   m_RpcLookup[lookupKey] = rpcID;
 
-  plLog::Dev("PL Net: Registered RPC '{}::{}' with ID {} (manual)",
-    pComponentType->GetTypeName(), sFunctionName, rpcID);
+  plLog::Dev("PL Net: Registered RPC '{}::{}' with ID {}", pComponentType->GetTypeName(), pFunction->GetPropertyName(), rpcID);
 }
 
 void plNetworkRpcManager::RegisterAllRpcs()
@@ -198,20 +225,25 @@ const plNetworkRpcInfo* plNetworkRpcManager::GetRpcInfo(const plRTTI* pComponent
 
 plUInt32 plNetworkRpcManager::GenerateRpcID(const plRTTI* pComponentType, plStringView sFunctionName)
 {
-  // Create a deterministic ID from type + function name for network compatibility
-  plUInt64 hash = (static_cast<plUInt64>(pComponentType->GetTypeNameHash()) << 32) |
-                  plHashingUtils::StringHash(sFunctionName);
-
-  // Use lower 32 bits, ensure non-zero
-  plUInt32 id = static_cast<plUInt32>(hash & 0xFFFFFFFF);
-  if (id == 0)
-    id = 1;
-
-  return id;
+  // Type and function name both go in, so two component types can have RPCs of the same name.
+  const plUInt32 uiTypeHash = plHashingUtils::StringHashTo32(pComponentType->GetTypeNameHash());
+  const plUInt32 id = plHashingUtils::CombineHashValues32(uiTypeHash, plHashingUtils::StringHashTo32(plHashingUtils::StringHash(sFunctionName)));
+  return id == 0 ? 1 : id;
 }
 
 //////////////////////////////////////////////////////////////////////////
 // RPC Invocation
+//
+// Where a call runs, by target and caller. A host counts as a client; B is the only client a multicast names.
+//
+//   target              | called on the server          | called on the owning client A
+//   Server              | the server                    | the server
+//   Owner               | the owner                     | A, locally
+//   AllClients          | every client, the host too    | A locally, then every other client and a host
+//   AllClientsAndServer | everyone                      | A locally, then everyone else
+//   Multicast           | the listed clients            | refused: CallRpc returns false
+//
+// A client may only call RPCs on objects it owns; the server checks that before it runs or relays a call.
 //////////////////////////////////////////////////////////////////////////
 
 bool plNetworkRpcManager::CallRpc(plNetworkComponent* pComponent, plStringView sFunctionName, plArrayPtr<plVariant> arguments)
@@ -220,208 +252,18 @@ bool plNetworkRpcManager::CallRpc(plNetworkComponent* pComponent, plStringView s
 }
 
 bool plNetworkRpcManager::CallRpc(
-  plNetworkComponent* pComponent, 
+  plNetworkComponent* pComponent,
   plStringView sFunctionName,
-  plArrayPtr<plVariant> arguments, 
+  plArrayPtr<plVariant> arguments,
   const plDynamicArray<plUInt32>& targetClients)
 {
-  if (!m_pNetworkModule || !pComponent)
+  if (!pComponent)
   {
     plLog::Warning("PL Net: Cannot call RPC - invalid state");
     return false;
   }
 
-  // Find the RPC info
-  const plNetworkRpcInfo* pRpcInfo = GetRpcInfo(pComponent->GetDynamicRTTI(), sFunctionName);
-  if (!pRpcInfo)
-  {
-    plLog::Warning("PL Net: RPC '{}' not found on component type '{}'",
-      sFunctionName, pComponent->GetDynamicRTTI()->GetTypeName());
-    return false;
-  }
-
-  // Validate argument count
-  if (pRpcInfo->m_pFunction->GetArgumentCount() != arguments.GetCount())
-  {
-    plLog::Error("PL Net: RPC '{}' expects {} arguments, got {}",
-      sFunctionName, pRpcInfo->m_pFunction->GetArgumentCount(), arguments.GetCount());
-    return false;
-  }
-
-  // Get the network ID for this component
-  plUInt32 componentNetID = pComponent->GetNetID();
-  if (componentNetID == static_cast<plUInt32>(-1))
-  {
-    plLog::Warning("PL Net: Cannot call RPC on non-networked component");
-    return false;
-  }
-
-  plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
-  if (!pPeer)
-  {
-    plLog::Warning("PL Net: No network peer available for RPC");
-    return false;
-  }
-
-  // Build the RPC message
-  plNetworkMessage msg = pPeer->BeginSendMessage();
-
-  msg.WriteUInt8(plNetworkMessageIDs::ObjectRpc);
-  msg.WriteUInt32(pRpcInfo->m_uiRpcID);
-  msg.WriteUInt32(componentNetID);
-
-  // Serialize arguments
-  SerializeArguments(msg, pRpcInfo->m_pFunction, arguments);
-
-  // Set channel type based on reliability
-  msg.SetChannelType(GetChannelType(pRpcInfo->m_Reliability));
-
-  // Determine targets based on RPC target type
-  switch (pRpcInfo->m_Target)
-  {
-    case plNetworkRpcTarget::Server:
-    {
-      if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // We are the server, execute locally
-        plVariant returnValue;
-        plDynamicArray<plVariant> args;
-        args.SetCount(arguments.GetCount());
-        for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
-          args[i] = arguments[i];
-
-        pRpcInfo->m_pFunction->Execute(pComponent, args, returnValue);
-      }
-      else
-      {
-        // Send to server
-        pPeer->SendMessages(msg);
-      }
-      break;
-    }
-
-    case plNetworkRpcTarget::Owner:
-    {
-      // Get owner from the network object manager
-      plUInt32 ownerClientID = 0;
-      plNetworkComponent* pNetComp = nullptr;
-      if (pComponent->GetOwner()->TryGetComponentOfBaseType(pNetComp) && pNetComp->GetNetID() != 0)
-      {
-        const plNetworkObjectInfo* pObjInfo = m_pNetworkModule->GetObjectManager()->GetObjectInfo(pNetComp->GetNetID());
-        if (pObjInfo)
-        {
-          ownerClientID = pObjInfo->m_uiOwnerClientID;
-        }
-      }
-
-      if (m_pNetworkModule->GetLocalClientID() == ownerClientID)
-      {
-        // Execute locally
-        plVariant returnValue;
-        plDynamicArray<plVariant> args;
-        args.SetCount(arguments.GetCount());
-        for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
-          args[i] = arguments[i];
-
-        pRpcInfo->m_pFunction->Execute(pComponent, args, returnValue);
-      }
-      else if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // Send to owner client
-        plNetworkClient* pOwnerClient = m_pNetworkModule->GetClient(ownerClientID);
-        if (pOwnerClient)
-        {
-          pPeer->SendMessages(msg, pOwnerClient->m_Connection);
-        }
-      }
-      break;
-    }
-
-    case plNetworkRpcTarget::AllClients:
-    {
-      if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // Broadcast to all clients
-        plDynamicArray<plNetworkConnection> targets;
-        for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-        {
-          if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-          {
-            targets.PushBack(pClient->m_Connection);
-          }
-        }
-        if (!targets.IsEmpty())
-        {
-          pPeer->SendMessages(msg, targets);
-        }
-      }
-      else
-      {
-        // Client needs to ask server to broadcast
-        pPeer->SendMessages(msg);
-      }
-      break;
-    }
-
-    case plNetworkRpcTarget::AllClientsAndServer:
-    {
-      // Execute locally
-      plVariant returnValue;
-      plDynamicArray<plVariant> args;
-      args.SetCount(arguments.GetCount());
-      for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
-        args[i] = arguments[i];
-
-      pRpcInfo->m_pFunction->Execute(pComponent, args, returnValue);
-
-      if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // Broadcast to all clients
-        plDynamicArray<plNetworkConnection> targets;
-        for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-        {
-          if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-          {
-            targets.PushBack(pClient->m_Connection);
-          }
-        }
-        if (!targets.IsEmpty())
-        {
-          pPeer->SendMessages(msg, targets);
-        }
-      }
-      else
-      {
-        // Send to server for relay
-        pPeer->SendMessages(msg);
-      }
-      break;
-    }
-
-    case plNetworkRpcTarget::Multicast:
-    {
-      if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // Send to specific clients
-        plDynamicArray<plNetworkConnection> targets;
-        for (plUInt32 clientID : targetClients)
-        {
-          plNetworkClient* pClient = m_pNetworkModule->GetClient(clientID);
-          if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-          {
-            targets.PushBack(pClient->m_Connection);
-          }
-        }
-        if (!targets.IsEmpty())
-        {
-          pPeer->SendMessages(msg, targets);
-        }
-      }
-      break;
-    }
-  }
-
-  return true;
+  return CallRpc(static_cast<plComponent*>(pComponent), pComponent->GetNetID(), sFunctionName, arguments, targetClients);
 }
 
 bool plNetworkRpcManager::CallRpc(plComponent* pComponent, plUInt32 uiNetID, plStringView sFunctionName, plArrayPtr<plVariant> arguments)
@@ -442,27 +284,16 @@ bool plNetworkRpcManager::CallRpc(
     return false;
   }
 
-  // Find the RPC info
   const plNetworkRpcInfo* pRpcInfo = GetRpcInfo(pComponent->GetDynamicRTTI(), sFunctionName);
   if (!pRpcInfo)
   {
-    plLog::Warning("PL Net: RPC '{}' not found on component type '{}'",
-      sFunctionName, pComponent->GetDynamicRTTI()->GetTypeName());
+    plLog::Warning("PL Net: RPC '{}' not found on component type '{}'", sFunctionName, pComponent->GetDynamicRTTI()->GetTypeName());
     return false;
   }
 
-  // Validate argument count
-  if (pRpcInfo->m_pFunction->GetArgumentCount() != arguments.GetCount())
+  if (uiNetID == 0 || uiNetID == plMath::MaxValue<plUInt32>())
   {
-    plLog::Error("PL Net: RPC '{}' expects {} arguments, got {}",
-      sFunctionName, pRpcInfo->m_pFunction->GetArgumentCount(), arguments.GetCount());
-    return false;
-  }
-
-  // Use the provided network ID
-  if (uiNetID == plMath::MaxValue<plUInt32>())
-  {
-    plLog::Warning("PL Net: Cannot call RPC on component with invalid net ID");
+    plLog::Warning("PL Net: Cannot call RPC '{}' on a component without a NetID", sFunctionName);
     return false;
   }
 
@@ -473,98 +304,139 @@ bool plNetworkRpcManager::CallRpc(
     return false;
   }
 
-  // Build the RPC message
-  plNetworkMessage msg = pPeer->BeginSendMessage();
+  plDynamicArray<plVariant> args;
+  if (ConvertArguments(*pRpcInfo, arguments, args).Failed())
+    return false;
 
+  const bool bServer = !m_pNetworkModule->IsClient();
+  if (!bServer && pRpcInfo->m_Target == plNetworkRpcTarget::Multicast)
+  {
+    plLog::Warning("PL Net: RPC '{}' targets a list of clients, which only the server can call", sFunctionName);
+    return false;
+  }
+
+  plNetworkMessage msg = pPeer->BeginSendMessage();
   msg.WriteUInt8(plNetworkMessageIDs::ObjectRpc);
   msg.WriteUInt32(pRpcInfo->m_uiRpcID);
   msg.WriteUInt32(uiNetID);
-
-  // Serialize arguments
-  SerializeArguments(msg, pRpcInfo->m_pFunction, arguments);
-
-  // Set channel type based on reliability
+  SerializeArguments(msg, pRpcInfo->m_pFunction, args);
   msg.SetChannelType(GetChannelType(pRpcInfo->m_Reliability));
 
-  // Determine targets based on RPC target type
-  switch (pRpcInfo->m_Target)
+  if (bServer)
   {
-    case plNetworkRpcTarget::Server:
-    {
-      if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // We are the server, execute locally
-        plVariant returnValue;
-        plDynamicArray<plVariant> args;
-        args.SetCount(arguments.GetCount());
-        for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
-          args[i] = arguments[i];
-
-        pRpcInfo->m_pFunction->Execute(pComponent, args, returnValue);
-      }
-      else
-      {
-        // Send to server
-        pPeer->SendMessages(msg);
-      }
-      break;
-    }
-
-    case plNetworkRpcTarget::Owner:
-    case plNetworkRpcTarget::AllClients:
-    case plNetworkRpcTarget::AllClientsAndServer:
-    case plNetworkRpcTarget::Multicast:
-    {
-      // For non-server targets, we need to check if we're on the server
-      if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-      {
-        // Execute locally first for AllClientsAndServer
-        if (pRpcInfo->m_Target == plNetworkRpcTarget::AllClientsAndServer)
-        {
-          plVariant returnValue;
-          plDynamicArray<plVariant> args;
-          args.SetCount(arguments.GetCount());
-          for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
-            args[i] = arguments[i];
-
-          pRpcInfo->m_pFunction->Execute(pComponent, args, returnValue);
-        }
-
-        // Broadcast to appropriate clients
-        plDynamicArray<plNetworkConnection> targets;
-        for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-        {
-          if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-          {
-            if (pRpcInfo->m_Target == plNetworkRpcTarget::Multicast)
-            {
-              // Only send to specified clients
-              if (targetClients.Contains(pClient->m_uiClientID))
-              {
-                targets.PushBack(pClient->m_Connection);
-              }
-            }
-            else
-            {
-              targets.PushBack(pClient->m_Connection);
-            }
-          }
-        }
-        if (!targets.IsEmpty())
-        {
-          pPeer->SendMessages(msg, targets);
-        }
-      }
-      else
-      {
-        // Client needs to ask server to broadcast
-        pPeer->SendMessages(msg);
-      }
-      break;
-    }
+    RouteOnServer(*pRpcInfo, pComponent, GetOwnerOf(pComponent, uiNetID), args, msg, m_pNetworkModule->GetServerClientID(), targetClients);
+    return true;
   }
 
-  return true;
+  // A client runs what it is part of right away and hands the rest to the server.
+  switch (pRpcInfo->m_Target)
+  {
+    case plNetworkRpcTarget::Owner:
+      if (GetOwnerOf(pComponent, uiNetID) == m_pNetworkModule->GetLocalClientID())
+      {
+        Execute(*pRpcInfo, pComponent, args);
+        return true;
+      }
+      break;
+
+    case plNetworkRpcTarget::AllClients:
+    case plNetworkRpcTarget::AllClientsAndServer:
+      Execute(*pRpcInfo, pComponent, args);
+      break;
+
+    default:
+      break;
+  }
+
+  return pPeer->SendToServer(msg).Succeeded();
+}
+
+void plNetworkRpcManager::RouteOnServer(const plNetworkRpcInfo& rpcInfo, plComponent* pComponent, plUInt32 uiOwnerClientID, plArrayPtr<plVariant> arguments,
+  const plNetworkMessage& msg, plUInt32 uiCallerClientID, const plDynamicArray<plUInt32>& targetClients)
+{
+  // A client that called it has already run its own part; the server runs its part and sends the rest on.
+  const plUInt32 uiServerID = m_pNetworkModule->GetServerClientID();
+  const bool bHost = m_pNetworkModule->IsHost();
+
+  switch (rpcInfo.m_Target)
+  {
+    case plNetworkRpcTarget::Server:
+      Execute(rpcInfo, pComponent, arguments);
+      break;
+
+    case plNetworkRpcTarget::Owner:
+      if (uiOwnerClientID == uiServerID)
+        Execute(rpcInfo, pComponent, arguments);
+      else if (uiOwnerClientID != uiCallerClientID)
+        m_pNetworkModule->SendToClient(msg, uiOwnerClientID).IgnoreResult();
+      break;
+
+    case plNetworkRpcTarget::AllClients:
+      if (bHost)
+        Execute(rpcInfo, pComponent, arguments);
+      m_pNetworkModule->SendToConnectedClients(msg, uiCallerClientID).IgnoreResult();
+      break;
+
+    case plNetworkRpcTarget::AllClientsAndServer:
+      Execute(rpcInfo, pComponent, arguments);
+      m_pNetworkModule->SendToConnectedClients(msg, uiCallerClientID).IgnoreResult();
+      break;
+
+    case plNetworkRpcTarget::Multicast:
+      for (plUInt32 uiClientID : targetClients)
+      {
+        if (uiClientID == uiServerID)
+          Execute(rpcInfo, pComponent, arguments);
+        else
+          m_pNetworkModule->SendToClient(msg, uiClientID).IgnoreResult();
+      }
+      break;
+  }
+}
+
+void plNetworkRpcManager::Execute(const plNetworkRpcInfo& rpcInfo, plComponent* pComponent, plArrayPtr<plVariant> arguments)
+{
+  plVariant returnValue;
+  plDynamicArray<plVariant> args;
+  args = arguments;
+  rpcInfo.m_pFunction->Execute(pComponent, args, returnValue);
+}
+
+plUInt32 plNetworkRpcManager::GetOwnerOf(plComponent* pComponent, plUInt32 uiNetID) const
+{
+  if (const plNetworkComponent* pNetworkComponent = m_pNetworkModule->FindNetworkComponent(uiNetID))
+    return m_pNetworkModule->GetOwnerClientID(pNetworkComponent);
+
+  if (pComponent->IsInstanceOf<plNetworkComponent>())
+    return m_pNetworkModule->GetOwnerClientID(static_cast<plNetworkComponent*>(pComponent));
+
+  return m_pNetworkModule->GetServerClientID();
+}
+
+plResult plNetworkRpcManager::ConvertArguments(const plNetworkRpcInfo& rpcInfo, plArrayPtr<plVariant> arguments, plDynamicArray<plVariant>& out_arguments) const
+{
+  const plAbstractFunctionProperty* pFunction = rpcInfo.m_pFunction;
+  if (pFunction->GetArgumentCount() != arguments.GetCount())
+  {
+    plLog::Error("PL Net: RPC '{}' expects {} arguments, got {}", rpcInfo.m_sFunctionName, pFunction->GetArgumentCount(), arguments.GetCount());
+    return PL_FAILURE;
+  }
+
+  // The function is called with exactly its parameter types, here and on every receiver.
+  out_arguments.SetCount(arguments.GetCount());
+  for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
+  {
+    const plVariantType::Enum expected = GetArgumentVariantType(pFunction->GetArgumentType(i));
+    if (expected == plVariantType::Invalid || !arguments[i].CanConvertTo(expected))
+    {
+      plLog::Warning("PL Net: Not calling RPC '{}': argument {} does not convert to the type the function takes", rpcInfo.m_sFunctionName, i);
+      return PL_FAILURE;
+    }
+
+    out_arguments[i] = arguments[i].ConvertTo(expected);
+  }
+
+  return PL_SUCCESS;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -576,12 +448,26 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
   if (!m_pNetworkModule)
     return;
 
+  const plUInt32 uiStart = msg.m_uiPosition;
   plUInt32 rpcID = msg.ReadUInt32();
   plUInt32 componentNetID = msg.ReadUInt32();
   if (msg.HasReadError())
     return;
 
-  // Find the RPC info
+  // A call from the server for a component that has not started yet (a fresh spawn) runs once it starts, and calls
+  // behind it wait with it. Components register their RPCs when they start, so this comes before the RPC lookup.
+  plNetworkComponent* pComponent = m_pNetworkModule->FindNetworkComponent(componentNetID);
+  if (pComponent == nullptr || m_pNetworkModule->IsHoldingMessagesFor(componentNetID))
+  {
+    if (m_pNetworkModule->IsClient() && uiSenderClientID == m_pNetworkModule->GetServerClientID())
+      m_pNetworkModule->HoldRpcForComponent(componentNetID, uiSenderClientID, plArrayPtr<const plUInt8>(msg.m_pBuffer + uiStart, msg.m_uiLength - uiStart));
+    else
+      plLog::Warning("PL Net: RPC target component {} not found", componentNetID);
+
+    msg.m_uiPosition = msg.m_uiLength;
+    return;
+  }
+
   const plNetworkRpcInfo* pRpcInfo = GetRpcInfo(rpcID);
   if (!pRpcInfo)
   {
@@ -589,33 +475,22 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
     return;
   }
 
-  // Component IDs are hashes, not keys in the spawned-object table. Resolve the exact
-  // component first, then walk its owning hierarchy for authorization.
-  plNetworkComponent* pComponent = m_pNetworkModule->FindNetworkComponent(componentNetID);
-
-  if (!pComponent)
+  const bool bServer = !m_pNetworkModule->IsClient();
+  const plUInt32 uiOwnerClientID = m_pNetworkModule->GetOwnerClientID(pComponent);
+  if (bServer)
   {
-    plLog::Warning("PL Net: RPC target component {} not found", componentNetID);
-    return;
-  }
-
-  const plNetworkObjectInfo* pObjectInfo = m_pNetworkModule->FindOwningObject(pComponent);
-  const bool bAuthority = m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost();
-  if (bAuthority)
-  {
+    // Clients may call RPCs only on what they own, and never one aimed at a list of clients.
     plNetworkClient* pSender = m_pNetworkModule->GetClient(uiSenderClientID);
     if (uiSenderClientID != m_pNetworkModule->GetServerClientID() &&
-        (!pSender || pSender->m_ConnectionState != plNetworkConnectionState::Connected ||
-         !pObjectInfo || pObjectInfo->m_uiOwnerClientID != uiSenderClientID))
+        (!pSender || pSender->m_ConnectionState != plNetworkConnectionState::Connected || uiOwnerClientID != uiSenderClientID ||
+          pRpcInfo->m_Target == plNetworkRpcTarget::Multicast))
       return;
   }
-  else if (!m_pNetworkModule->IsClient() || uiSenderClientID != m_pNetworkModule->GetServerClientID() ||
-           pRpcInfo->m_Target == plNetworkRpcTarget::Server)
+  else if (uiSenderClientID != m_pNetworkModule->GetServerClientID() || pRpcInfo->m_Target == plNetworkRpcTarget::Server)
   {
     return;
   }
 
-  // Verify the component type matches
   if (!pComponent->GetDynamicRTTI()->IsDerivedFrom(pRpcInfo->m_pComponentType))
   {
     plLog::Warning("PL Net: RPC type mismatch - expected {}, got {}",
@@ -623,108 +498,35 @@ void plNetworkRpcManager::HandleRpcMessage(plNetworkMessage& msg, plUInt32 uiSen
     return;
   }
 
-  // Check if we should execute this RPC locally
-  const plUInt32 ownerClientID = pObjectInfo ? pObjectInfo->m_uiOwnerClientID : m_pNetworkModule->GetServerClientID();
-
   plDynamicArray<plVariant> arguments;
-  DeserializeArguments(msg, pRpcInfo->m_pFunction, arguments);
+  const bool bArgumentsMatch = DeserializeArguments(msg, pRpcInfo->m_pFunction, arguments);
   if (msg.HasReadError())
     return;
-  
-  if (!ShouldExecuteLocally(*pRpcInfo, uiSenderClientID, ownerClientID))
+
+  if (!bArgumentsMatch)
   {
-    // Need to relay this RPC
-    if (m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost())
-    {
-      // Server relays to appropriate targets based on RPC target type
-      plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
-      if (pPeer)
-      {
-        // Rebuild the RPC message for relay
-        plNetworkMessage relayMsg = pPeer->BeginSendMessage();
-        relayMsg.WriteUInt8(plNetworkMessageIDs::ObjectRpc);
-        relayMsg.WriteUInt32(pRpcInfo->m_uiRpcID);
-        relayMsg.WriteUInt32(componentNetID);
-        
-        // Re-serialize arguments from current position
-        SerializeArguments(relayMsg, pRpcInfo->m_pFunction, arguments.GetArrayPtr());
-        relayMsg.SetChannelType(GetChannelType(pRpcInfo->m_Reliability));
-        
-        // Send to appropriate targets
-        plDynamicArray<plNetworkConnection> targets;
-        for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-        {
-          if (!pClient || pClient->m_ConnectionState != plNetworkConnectionState::Connected)
-            continue;
-          
-          // Don't send back to original sender
-          if (pClient->m_uiClientID == uiSenderClientID)
-            continue;
-          
-          bool shouldSend = false;
-          switch (pRpcInfo->m_Target)
-          {
-            case plNetworkRpcTarget::Owner:
-              shouldSend = (pClient->m_uiClientID == ownerClientID);
-              break;
-            case plNetworkRpcTarget::AllClients:
-            case plNetworkRpcTarget::AllClientsAndServer:
-              shouldSend = true;
-              break;
-            default:
-              break;
-          }
-          
-          if (shouldSend)
-            targets.PushBack(pClient->m_Connection);
-        }
-        
-        if (!targets.IsEmpty())
-          pPeer->SendMessages(relayMsg, targets);
-        else
-          pPeer->CancelSendMessage(relayMsg);
-      }
-    }
+    // A well-formed call from a build with another signature: dropped, the connection is fine.
+    plLog::Warning("PL Net: Dropped RPC '{}::{}': its arguments do not match the function", pRpcInfo->m_pComponentType->GetTypeName(), pRpcInfo->m_sFunctionName);
     return;
   }
 
-  // Execute the RPC
-  plVariant returnValue;
-  pRpcInfo->m_pFunction->Execute(pComponent, arguments, returnValue);
-
-  plLog::Dev("PL Net: Executed RPC '{}' on component {}",
-    pRpcInfo->m_sFunctionName, componentNetID);
-}
-
-bool plNetworkRpcManager::ShouldExecuteLocally(const plNetworkRpcInfo& rpcInfo, plUInt32 uiSenderClientID, plUInt32 uiOwnerClientID) const
-{
-  if (!m_pNetworkModule)
-    return false;
-
-  plUInt32 localClientID = m_pNetworkModule->GetLocalClientID();
-  bool isServer = m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost();
-
-  switch (rpcInfo.m_Target)
+  if (!bServer)
   {
-    case plNetworkRpcTarget::Server:
-      return isServer;
-
-    case plNetworkRpcTarget::Owner:
-      return localClientID == uiOwnerClientID;
-
-    case plNetworkRpcTarget::AllClients:
-      return !isServer || m_pNetworkModule->IsHost();
-
-    case plNetworkRpcTarget::AllClientsAndServer:
-      return true;
-
-    case plNetworkRpcTarget::Multicast:
-      // For multicast, the targeting is handled elsewhere
-      return true;
-
-    default:
-      return false;
+    // The server only sends a client what it is meant to run.
+    Execute(*pRpcInfo, pComponent, arguments);
+    return;
   }
+
+  // Without a peer (the module is offline) the server's own part still runs and nothing is sent.
+  plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
+  plNetworkMessage relay = pPeer ? pPeer->BeginSendMessage() : plNetworkMessage();
+  relay.WriteUInt8(plNetworkMessageIDs::ObjectRpc);
+  relay.WriteUInt32(pRpcInfo->m_uiRpcID);
+  relay.WriteUInt32(componentNetID);
+  SerializeArguments(relay, pRpcInfo->m_pFunction, arguments);
+  relay.SetChannelType(GetChannelType(pRpcInfo->m_Reliability));
+
+  RouteOnServer(*pRpcInfo, pComponent, uiOwnerClientID, arguments, relay, uiSenderClientID, plDynamicArray<plUInt32>());
 }
 
 plNetworkChannelTypeEnum::Enum plNetworkRpcManager::GetChannelType(plNetworkRpcReliability::Enum reliability) const
@@ -749,6 +551,7 @@ plNetworkChannelTypeEnum::Enum plNetworkRpcManager::GetChannelType(plNetworkRpcR
 
 void plNetworkRpcManager::SerializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plArrayPtr<plVariant> arguments)
 {
+  PL_IGNORE_UNUSED(pFunction);
   msg.WriteUInt8(static_cast<plUInt8>(arguments.GetCount()));
 
   for (plUInt32 i = 0; i < arguments.GetCount(); ++i)
@@ -757,29 +560,37 @@ void plNetworkRpcManager::SerializeArguments(plNetworkMessage& msg, const plAbst
   }
 }
 
-void plNetworkRpcManager::DeserializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plDynamicArray<plVariant>& out_arguments)
+bool plNetworkRpcManager::DeserializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plDynamicArray<plVariant>& out_arguments)
 {
-  plUInt8 argCount = msg.ReadUInt8();
-  if (msg.HasReadError() || argCount != pFunction->GetArgumentCount())
-  {
-    msg.MarkReadError();
-    return;
-  }
-  out_arguments.SetCount(argCount);
+  const plUInt8 argCount = msg.ReadUInt8();
+  if (msg.HasReadError())
+    return false;
 
+  // Every argument is read as the type it was written as, so a call with another signature is parsed to its end and
+  // dropped; only a message that ends early or carries an unknown type is malformed.
+  bool bMatches = argCount == pFunction->GetArgumentCount();
+  out_arguments.SetCount(argCount);
   for (plUInt8 i = 0; i < argCount; ++i)
   {
-    const plRTTI* pExpectedType = pFunction->GetArgumentType(i);
-    out_arguments[i] = ReadVariant(msg, pExpectedType);
+    const plRTTI* pExpectedType = i < pFunction->GetArgumentCount() ? pFunction->GetArgumentType(i) : nullptr;
+    bool bTypeMatches = true;
+    out_arguments[i] = ReadVariant(msg, pExpectedType, bTypeMatches);
     if (!out_arguments[i].IsValid() || msg.HasReadError())
     {
       msg.MarkReadError();
       out_arguments.Clear();
-      return;
+      return false;
     }
+
+    bMatches = bMatches && bTypeMatches;
   }
+
   if (msg.GetRemainingBytes() != 0)
     msg.MarkReadError();
+
+  if (!bMatches)
+    out_arguments.Clear();
+  return bMatches;
 }
 
 void plNetworkRpcManager::WriteVariant(plNetworkMessage& msg, const plVariant& value)
@@ -867,7 +678,7 @@ void plNetworkRpcManager::WriteVariant(plNetworkMessage& msg, const plVariant& v
   }
 }
 
-plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* pExpectedType)
+plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* pExpectedType, bool& out_bTypeMatches)
 {
   plVariantType::Enum variantType = static_cast<plVariantType::Enum>(msg.ReadUInt8());
 
@@ -879,71 +690,10 @@ plVariant plNetworkRpcManager::ReadVariant(plNetworkMessage& msg, const plRTTI* 
     return plVariant();
   }
 
-  // Validate type matches expected if we have RTTI info
-  // This prevents attackers from sending wrong types to crash or corrupt state
-  if (pExpectedType != nullptr)
-  {
-    plVariantType::Enum expectedVariantType = plVariant::TypeDeduction<void>::value; // Invalid default
-    
-    // Map common RTTI types to variant types for validation
-    if (pExpectedType == plGetStaticRTTI<bool>())
-      expectedVariantType = plVariantType::Bool;
-    else if (pExpectedType == plGetStaticRTTI<plInt8>())
-      expectedVariantType = plVariantType::Int8;
-    else if (pExpectedType == plGetStaticRTTI<plUInt8>())
-      expectedVariantType = plVariantType::UInt8;
-    else if (pExpectedType == plGetStaticRTTI<plInt16>())
-      expectedVariantType = plVariantType::Int16;
-    else if (pExpectedType == plGetStaticRTTI<plUInt16>())
-      expectedVariantType = plVariantType::UInt16;
-    else if (pExpectedType == plGetStaticRTTI<plInt32>())
-      expectedVariantType = plVariantType::Int32;
-    else if (pExpectedType == plGetStaticRTTI<plUInt32>())
-      expectedVariantType = plVariantType::UInt32;
-    else if (pExpectedType == plGetStaticRTTI<plInt64>())
-      expectedVariantType = plVariantType::Int64;
-    else if (pExpectedType == plGetStaticRTTI<plUInt64>())
-      expectedVariantType = plVariantType::UInt64;
-    else if (pExpectedType == plGetStaticRTTI<float>())
-      expectedVariantType = plVariantType::Float;
-    else if (pExpectedType == plGetStaticRTTI<double>())
-      expectedVariantType = plVariantType::Double;
-    else if (pExpectedType == plGetStaticRTTI<plVec2>())
-      expectedVariantType = plVariantType::Vector2;
-    else if (pExpectedType == plGetStaticRTTI<plVec3>())
-      expectedVariantType = plVariantType::Vector3;
-    else if (pExpectedType == plGetStaticRTTI<plVec4>())
-      expectedVariantType = plVariantType::Vector4;
-    else if (pExpectedType == plGetStaticRTTI<plQuat>())
-      expectedVariantType = plVariantType::Quaternion;
-    else if (pExpectedType == plGetStaticRTTI<plString>())
-      expectedVariantType = plVariantType::String;
-    else if (pExpectedType == plGetStaticRTTI<plStringView>() || pExpectedType == plGetStaticRTTI<const char*>())
-      expectedVariantType = plVariantType::String;
-
-    if (expectedVariantType == plVariantType::Invalid)
-    {
-      msg.MarkReadError();
-      return plVariant();
-    }
-    
-    // If we determined an expected type, validate it matches
-    if (expectedVariantType != plVariant::TypeDeduction<void>::value && 
-        variantType != expectedVariantType)
-    {
-      // Allow String/StringView interchangeability
-      bool isStringCompatible = (expectedVariantType == plVariantType::String || expectedVariantType == plVariantType::StringView) &&
-                                (variantType == plVariantType::String || variantType == plVariantType::StringView);
-      
-      if (!isStringCompatible)
-      {
-        plLog::Warning("PL Net: RPC argument type mismatch - expected {}, got {}. Possible attack or version mismatch.",
-          static_cast<int>(expectedVariantType), static_cast<int>(variantType));
-        msg.MarkReadError();
-        return plVariant();
-      }
-    }
-  }
+  // A value of another type than the function takes is still read, so the rest of the message parses; the call is not run.
+  const plVariantType::Enum expectedVariantType = pExpectedType != nullptr ? GetArgumentVariantType(pExpectedType) : plVariantType::Invalid;
+  out_bTypeMatches = expectedVariantType != plVariantType::Invalid &&
+                     (variantType == expectedVariantType || (IsStringType(expectedVariantType) && IsStringType(variantType)));
 
   switch (variantType)
   {

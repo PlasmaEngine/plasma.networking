@@ -2,11 +2,13 @@
 
 #include <NetworkPlugin/Components/NetworkedRigidbodyComponent.h>
 #include <NetworkPlugin/Core/NetworkObjectManager.h>
+#include <Core/WorldSerializer/WorldReader.h>
+#include <Core/WorldSerializer/WorldWriter.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 
 // clang-format off
-PL_BEGIN_COMPONENT_TYPE(plNetworkedRigidbodyComponent, 1, plComponentMode::Dynamic)
+PL_BEGIN_COMPONENT_TYPE(plNetworkedRigidbodyComponent, 2, plComponentMode::Dynamic)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -53,25 +55,36 @@ void plNetworkedRigidbodyComponent::OnSimulationStarted()
   }
 }
 
+void plNetworkedRigidbodyComponent::SerializeComponent(plWorldWriter& inout_stream) const
+{
+  SUPER::SerializeComponent(inout_stream);
+  plStreamWriter& s = inout_stream.GetStream();
+
+  s << m_fInterpolationSpeed;
+  s << m_fTeleportThreshold;
+  s << m_bSyncVelocity;
+  s << m_bSyncAngularVelocity;
+}
+
+void plNetworkedRigidbodyComponent::DeserializeComponent(plWorldReader& inout_stream)
+{
+  SUPER::DeserializeComponent(inout_stream);
+  if (inout_stream.GetComponentTypeVersion(GetStaticRTTI()) < 2)
+    return; // exported before this component wrote any data; re-transform the scene
+
+  plStreamReader& s = inout_stream.GetStream();
+  s >> m_fInterpolationSpeed;
+  s >> m_fTeleportThreshold;
+  s >> m_bSyncVelocity;
+  s >> m_bSyncAngularVelocity;
+}
+
 bool plNetworkedRigidbodyComponent::HasStateAuthority() const
 {
   if (!m_pNetworkModule)
     return false;
 
-  // Use base class NetID which is set by the spawn system
-  plUInt32 netID = GetNetID();
-  
-  // If we don't have a network ID yet, fallback to server/host
-  if (netID == 0)
-  {
-    return m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost();
-  }
-
-  auto* pObjectManager = m_pNetworkModule->GetObjectManager();
-  if (!pObjectManager)
-    return false;
-
-  const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(netID);
+  const plNetworkObjectInfo* pInfo = m_pNetworkModule->FindOwningObject(this);
   if (!pInfo)
   {
     // Object not found in manager - fallback to server/host authority
@@ -97,19 +110,8 @@ bool plNetworkedRigidbodyComponent::HasInputAuthority() const
   if (!m_pNetworkModule)
     return false;
 
-  plUInt32 netID = GetNetID();
-  if (netID == 0)
-    return false;
-
-  auto* pObjectManager = m_pNetworkModule->GetObjectManager();
-  if (!pObjectManager)
-    return false;
-
-  const plNetworkObjectInfo* pInfo = pObjectManager->GetObjectInfo(netID);
-  if (!pInfo)
-    return false;
-
-  return pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
+  const plNetworkObjectInfo* pInfo = m_pNetworkModule->FindOwningObject(this);
+  return pInfo != nullptr && pInfo->m_uiOwnerClientID == m_pNetworkModule->GetLocalClientID();
 }
 
 void plNetworkedRigidbodyComponent::Update()

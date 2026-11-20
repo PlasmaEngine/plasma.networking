@@ -1,10 +1,12 @@
 #include <NetworkPlugin/NetworkPluginPCH.h>
 
+#include <Core/WorldSerializer/WorldReader.h>
+#include <Core/WorldSerializer/WorldWriter.h>
 #include <NetworkPlugin/Components/NetworkDebugComponent.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 
 // clang-format off
-PL_BEGIN_COMPONENT_TYPE(plNetworkDebugComponent, 1, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plNetworkDebugComponent, 2, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -23,6 +25,32 @@ PL_BEGIN_COMPONENT_TYPE(plNetworkDebugComponent, 1, plComponentMode::Static)
 }
 PL_END_COMPONENT_TYPE
 // clang-format on
+
+void plNetworkDebugComponent::SerializeComponent(plWorldWriter& inout_stream) const
+{
+  SUPER::SerializeComponent(inout_stream);
+  plStreamWriter& s = inout_stream.GetStream();
+
+  s << m_bShowNetworkId;
+  s << m_bShowReplicationState;
+  s << m_bShowNetworkRole;
+  s << m_fTextScale;
+  s << m_vTextOffset;
+}
+
+void plNetworkDebugComponent::DeserializeComponent(plWorldReader& inout_stream)
+{
+  SUPER::DeserializeComponent(inout_stream);
+  if (inout_stream.GetComponentTypeVersion(GetStaticRTTI()) < 2)
+    return; // exported before this component wrote any data; re-transform the scene
+
+  plStreamReader& s = inout_stream.GetStream();
+  s >> m_bShowNetworkId;
+  s >> m_bShowReplicationState;
+  s >> m_bShowNetworkRole;
+  s >> m_fTextScale;
+  s >> m_vTextOffset;
+}
 
 void plNetworkDebugComponent::OnSimulationStarted()
 {

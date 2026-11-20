@@ -105,34 +105,19 @@ void plNetworkLevelManager::RequestLevelLoad(const plString& sLevelPath, float f
   m_PendingClients.Clear();
   m_LoadedClients.Clear();
 
-  // Build list of connected clients that need to load
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      m_PendingClients.Insert(pClient->m_uiClientID);
-    }
-  }
+  // Every admitted client has to load and acknowledge the level.
+  plHybridArray<plNetworkClient*, 32> clients;
+  m_pNetworkModule->GetConnectedClients(clients);
+  for (plNetworkClient* pClient : clients)
+    m_PendingClients.Insert(pClient->m_uiClientID);
 
-  // Send LevelLoad to all connected clients
-  plDynamicArray<plNetworkConnection> targets;
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
-  }
-
-  if (!targets.IsEmpty())
   {
     plNetworkMessage msg = pPeer->BeginSendMessage();
     msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::LevelLoad));
     msg.WriteUInt64(m_uiLoadGeneration);
     msg.WriteString(sLevelPath);
     msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-    m_pNetworkModule->GetBandwidthManager()->RecordBytesSent(msg.m_uiLength * targets.GetCount());
-    pPeer->SendMessages(msg, targets);
+    m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
   }
 
   plLog::Dev("PL Net LevelManager: Requested level load '{}' for {} client(s).",
@@ -174,6 +159,9 @@ void plNetworkLevelManager::HandleLevelLoadComplete(plUInt32 uiClientID, plUInt6
   m_PendingClients.Remove(uiClientID);
   m_LoadedClients.Insert(uiClientID);
 
+  // The client's level objects exist now; state sent while it loaded may have arrived before them.
+  m_pNetworkModule->SyncComponentStatesToClient(m_pNetworkModule->GetClient(uiClientID));
+
   if (m_State != plNetworkLevelState::Loading)
   {
     // Late ack after we already started - this is a late-joiner finishing load
@@ -183,6 +171,13 @@ void plNetworkLevelManager::HandleLevelLoadComplete(plUInt32 uiClientID, plUInt6
   }
 
   plLog::Dev("PL Net LevelManager: Client {} finished loading. {} pending.", uiClientID, m_PendingClients.GetCount());
+}
+
+void plNetworkLevelManager::OnClientDisconnected(plUInt32 uiClientID)
+{
+  // Update() starts the level once nobody is pending, so the remaining clients do not wait for the timeout.
+  m_PendingClients.Remove(uiClientID);
+  m_LoadedClients.Remove(uiClientID);
 }
 
 void plNetworkLevelManager::SyncLevelToClient(plUInt32 uiClientID)
@@ -208,8 +203,7 @@ void plNetworkLevelManager::SyncLevelToClient(plUInt32 uiClientID)
   msg.WriteUInt64(m_uiLoadGeneration);
   msg.WriteString(m_sCurrentLevelPath);
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  m_pNetworkModule->GetBandwidthManager()->RecordBytesSent(msg.m_uiLength);
-  pPeer->SendMessages(msg, pClient->m_Connection);
+  m_pNetworkModule->SendToClient(msg, uiClientID).IgnoreResult();
 
   // Track this client as pending (will send LevelStart when they ack)
   m_PendingClients.Insert(uiClientID);
@@ -254,7 +248,7 @@ void plNetworkLevelManager::NotifyLoadComplete()
   msg.WriteUInt64(m_uiLoadGeneration);
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
   m_pNetworkModule->GetBandwidthManager()->RecordBytesSent(msg.m_uiLength);
-  pPeer->SendMessages(msg);
+  pPeer->SendToServer(msg).IgnoreResult();
 
   plLog::Dev("PL Net LevelManager: Sent LevelLoadComplete to server.");
 }
@@ -297,23 +291,12 @@ void plNetworkLevelManager::BroadcastLevelStart()
   if (!pPeer)
     return;
 
-  plDynamicArray<plNetworkConnection> targets;
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
-  }
-
-  if (!targets.IsEmpty())
   {
     plNetworkMessage msg = pPeer->BeginSendMessage();
     msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::LevelStart));
     msg.WriteUInt64(m_uiLoadGeneration);
     msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-    m_pNetworkModule->GetBandwidthManager()->RecordBytesSent(msg.m_uiLength * targets.GetCount());
-    pPeer->SendMessages(msg, targets);
+    m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
   }
 
   plLog::Dev("PL Net LevelManager: Broadcast LevelStart.");
@@ -343,8 +326,7 @@ void plNetworkLevelManager::SendLevelStartToClient(plUInt32 uiClientID)
   msg.WriteUInt8(static_cast<plUInt8>(plNetworkMessageIDs::LevelStart));
   msg.WriteUInt64(m_uiLoadGeneration);
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  m_pNetworkModule->GetBandwidthManager()->RecordBytesSent(msg.m_uiLength);
-  pPeer->SendMessages(msg, pClient->m_Connection);
+  m_pNetworkModule->SendToClient(msg, uiClientID).IgnoreResult();
 
   plLog::Dev("PL Net LevelManager: Sent LevelStart to client {}.", uiClientID);
 }

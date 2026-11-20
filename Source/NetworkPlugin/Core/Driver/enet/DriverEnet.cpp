@@ -129,27 +129,42 @@ plResult plDriverEnet::Connect()
   return PL_SUCCESS;
 }
 
-void plDriverEnet::Disconnect()
+void plDriverEnet::Disconnect(plUInt32 uiReason)
 {
   if(m_pEnetPeer)
   {
-    enet_peer_disconnect_now(m_pEnetPeer, 0);
+    enet_peer_disconnect_now(m_pEnetPeer, uiReason);
     m_pEnetPeer = nullptr;
     plLog::Info("ENet: Disconnected.");
   }
 }
 
-void plDriverEnet::Disconnect(const plNetworkConnection& connection)
+void plDriverEnet::Disconnect(const plNetworkConnection& connection, plUInt32 uiReason)
 {
   ENetPeer* peer;
 
   if(m_PeerMap.TryGetValue(connection.m_uiConnectionID, peer))
   {
-    enet_peer_disconnect_now(peer, 0);
+    enet_peer_disconnect_now(peer, uiReason);
     m_ConnectionIDs.Remove(peer);
     m_PeerMap.Remove(connection.m_uiConnectionID);
     plLog::Info("ENet: Disconnected Id: {}.", connection.m_uiConnectionID);
   }
+}
+
+void plDriverEnet::DisconnectAll(plUInt32 uiReason)
+{
+  if (m_pEnetPeer)
+  {
+    Disconnect(uiReason);
+    return;
+  }
+
+  for (auto it = m_PeerMap.GetIterator(); it.IsValid(); ++it)
+    enet_peer_disconnect_now(it.Value(), uiReason);
+
+  m_PeerMap.Clear();
+  m_ConnectionIDs.Clear();
 }
 
 plResult plDriverEnet::PopEvent(plNetworkEvent& event)
@@ -163,6 +178,11 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
   // the world module's event pump for the rest of the frame.
   while (true)
   {
+    // ENet has already acknowledged a received packet; with no buffer to copy it into it stays queued in ENet until the
+    // next update instead of being dropped.
+    if (m_pNetworkPeer != nullptr && !m_pNetworkPeer->HasFreeMessage())
+      return PL_FAILURE;
+
     ENetEvent enetEvent;
     const int result = enet_host_service(m_pEnetHost, &enetEvent, 0);
 
@@ -193,6 +213,7 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
       }
     }
     event.m_Sender.m_uiConnectionID = connectionId;
+    event.m_uiData = enetEvent.type == ENET_EVENT_TYPE_DISCONNECT ? enetEvent.data : 0;
 
     switch (enetEvent.type)
     {
@@ -240,7 +261,8 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
         event.m_Message = m_pNetworkPeer->CreateMessage();
         if (!event.m_Message.IsValid())
         {
-          plLog::Error("ENet: Failed to create message buffer - pool may be exhausted");
+          // Checked before servicing, so this is a pool the caller emptied in between.
+          plLog::Error("ENet: No message buffer for a received packet of {} bytes", enetEvent.packet->dataLength);
           enet_packet_destroy(enetEvent.packet);
           continue;
         }
@@ -254,6 +276,12 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
         }
         event.m_Message.m_uiLength = static_cast<plUInt32>(enetEvent.packet->dataLength);
         plMemoryUtils::Copy(event.m_Message.m_pBuffer, enetEvent.packet->data, event.m_Message.m_uiLength);
+        if ((enetEvent.packet->flags & ENET_PACKET_FLAG_RELIABLE) != 0)
+          event.m_Message.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
+        else if ((enetEvent.packet->flags & ENET_PACKET_FLAG_UNSEQUENCED) != 0)
+          event.m_Message.SetChannelType(plNetworkChannelTypeEnum::Unreliable);
+        else
+          event.m_Message.SetChannelType(plNetworkChannelTypeEnum::UnreliableOrdered);
         enet_packet_destroy(enetEvent.packet);
         break;
       }

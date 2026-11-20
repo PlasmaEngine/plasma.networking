@@ -1,0 +1,178 @@
+name: NetworkTest
+
+# Builds the networking plugin and NetworkTest against a pinned engine SDK and runs the suite on Windows and Linux.
+# The engine repository is private: PLASMA_ENGINE_TOKEN (or PLASMA_PACKAGES_TOKEN) must grant read access to
+# PlasmaEngine/PlasmaEngine2. plasma.jolt is public and checked out at the commit the engine tests with.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      engine_ref:
+        description: Engine tag, branch or commit to build against
+        required: false
+      jolt_ref:
+        description: plasma.jolt commit to build against
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PLASMA_CONFIGURATION: Development
+  # Move both with the engine release this package targets (the engine pins this package in TestPackages.json).
+  PLASMA_ENGINE_REF: ${{ inputs.engine_ref || 'v0.12.1' }}
+  PLASMA_JOLT_REF: ${{ inputs.jolt_ref || 'ff83b095dafe75d23e23740e38d6e2365d98fd4c' }}
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  networktest:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform == 'Windows' && (vars.PLASMA_WINDOWS_RUNNER || 'blacksmith-16vcpu-windows-2025') || (vars.PLASMA_LINUX_RUNNER || 'blacksmith-16vcpu-ubuntu-2404') }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [Windows, Linux]
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Check out plasma.networking
+        uses: actions/checkout@v4
+        with:
+          path: packages/plasma.networking
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out plasma.jolt
+        uses: actions/checkout@v4
+        with:
+          repository: PlasmaEngine/plasma.jolt
+          ref: ${{ env.PLASMA_JOLT_REF }}
+          path: packages/plasma.jolt
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the engine SDK
+        uses: actions/checkout@v4
+        with:
+          repository: PlasmaEngine/PlasmaEngine2
+          ref: ${{ env.PLASMA_ENGINE_REF }}
+          token: ${{ secrets.PLASMA_ENGINE_TOKEN || secrets.PLASMA_PACKAGES_TOKEN }}
+          path: engine
+          lfs: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: engine/global.json
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential clang lld llvm libomp-dev cmake ninja-build pkg-config file \
+            uuid-dev libicu-dev libssl-dev libx11-dev libxcb1-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libfreetype6-dev libvulkan-dev
+
+      - name: Install PlasmaBuild (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: engine
+        run: |
+          prefix="$RUNNER_TEMP/PlasmaBuild"
+          ./Setup.sh --prefix "$prefix" --bin-dir "$RUNNER_TEMP/bin" --no-modify-path
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "PLASMA_BUILD_DIR=$prefix" >> "$GITHUB_ENV"
+
+      - name: Install PlasmaBuild (Windows)
+        if: runner.os == 'Windows'
+        working-directory: engine
+        run: |
+          ./Setup.ps1
+          $plasmaBuildDirectory = Join-Path $env:LOCALAPPDATA 'Programs\PlasmaBuild'
+          $plasmaBuildDirectory >> $env:GITHUB_PATH
+          "PLASMA_BUILD_DIR=$plasmaBuildDirectory" >> $env:GITHUB_ENV
+
+      - name: Point the packages at the engine SDK
+        run: |
+          "PLASMA_SDK_ROOT=$(Resolve-Path engine)" >> $env:GITHUB_ENV
+          "PLASMA_PACKAGE_PATH=$(Resolve-Path packages)" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Path logs -Force | Out-Null
+
+      # Only the engine libraries the plugin and the test link against: GameEngine pulls in Foundation, Core and RendererCore.
+      - name: Build the engine SDK
+        working-directory: engine
+        run: |
+          foreach ($target in 'GameEngine', 'TestFramework')
+          {
+            Write-Host "::group::Build $target"
+            plasmabuild build $target -p ${{ matrix.platform }} -a x64 -c $env:PLASMA_CONFIGURATION --no-color 2>&1 | Tee-Object -FilePath "../logs/engine-$target.log"
+            $code = $LASTEXITCODE
+            Write-Host '::endgroup::'
+            if ($code -ne 0) { throw "Engine target $target failed ($code)" }
+          }
+
+      - name: Build plasma.jolt
+        working-directory: packages/plasma.jolt
+        run: |
+          plasmabuild build JoltPlugin -p ${{ matrix.platform }} -a x64 -c $env:PLASMA_CONFIGURATION --no-color 2>&1 | Tee-Object -FilePath ../../logs/jolt.log
+          if ($LASTEXITCODE -ne 0) { throw "JoltPlugin failed ($LASTEXITCODE)" }
+
+      - name: Build NetworkTest
+        working-directory: packages/plasma.networking
+        run: |
+          plasmabuild build NetworkTest -p ${{ matrix.platform }} -a x64 -c $env:PLASMA_CONFIGURATION --no-color 2>&1 | Tee-Object -FilePath ../../logs/networktest-build.log
+          if ($LASTEXITCODE -ne 0) { throw "NetworkTest failed to build ($LASTEXITCODE)" }
+
+      - name: Run NetworkTest
+        working-directory: packages/plasma.networking
+        run: |
+          $config = $env:PLASMA_CONFIGURATION
+          $platform = '${{ matrix.platform }}'
+          $directories = @(
+            (Resolve-Path "Bin/${platform}_x64_$config"),
+            (Resolve-Path "../plasma.jolt/Bin/${platform}_x64_$config"),
+            (Resolve-Path "$env:PLASMA_SDK_ROOT/Binaries/${platform}_$config"))
+          $separator = [IO.Path]::PathSeparator
+          $executable = Resolve-Path "Bin/Tests/${platform}_x64_$config/NetworkTest$(if ($IsWindows) { '.exe' })"
+          if ($IsWindows) { $env:PATH = ($directories -join $separator) + $separator + $env:PATH }
+          else { $env:LD_LIBRARY_PATH = ($directories -join $separator) + $separator + $env:LD_LIBRARY_PATH }
+
+          $output = Resolve-Path ../../logs
+          & $executable -nogui -run -close -outputDir $output -json (Join-Path $output 'results.json') 2>&1 | Tee-Object -FilePath (Join-Path $output 'networktest.log')
+          $code = $LASTEXITCODE
+
+          # The rates and byte budgets the suite measures, for the job summary.
+          $measured = Select-String -Path (Join-Path $output 'networktest.log') -Pattern 'NetworkBudget:|NetworkRate:' | ForEach-Object { $_.Line.Trim() }
+          "### NetworkTest on $platform" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          $measured >> $env:GITHUB_STEP_SUMMARY
+          Select-String -Path (Join-Path $output 'networktest.log') -Pattern "Sub-Test '.*' (succeeded|failed)" | ForEach-Object { $_.Line.Trim() } >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "NetworkTest failed ($code)" }
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: networktest-${{ matrix.platform }}
+          path: logs
+          if-no-files-found: warn

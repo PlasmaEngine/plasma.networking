@@ -130,8 +130,9 @@ plResult plDriverPlatform::Connect()
   return PL_SUCCESS;
 }
 
-void plDriverPlatform::Disconnect()
+void plDriverPlatform::Disconnect(plUInt32 uiReason)
 {
+  PL_IGNORE_UNUSED(uiReason);
   if (m_pTransport != nullptr && m_ServerUser.IsValid())
   {
     m_pTransport->Disconnect(m_ServerUser);
@@ -141,8 +142,9 @@ void plDriverPlatform::Disconnect()
   }
 }
 
-void plDriverPlatform::Disconnect(const plNetworkConnection& connection)
+void plDriverPlatform::Disconnect(const plNetworkConnection& connection, plUInt32 uiReason)
 {
+  PL_IGNORE_UNUSED(uiReason);
   if (m_pTransport == nullptr)
     return;
 

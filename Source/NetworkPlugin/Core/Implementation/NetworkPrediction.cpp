@@ -158,7 +158,7 @@ void plNetworkPredictionManager::SendInputs(plNetworkPredictedComponent& compone
     WriteInput(msg, component.m_PredictedFrames[i].m_Input);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::Unreliable);
-  m_pModule->GetPeer()->SendMessages(msg);
+  m_pModule->GetPeer()->SendToServer(msg).IgnoreResult();
 }
 
 void plNetworkPredictionManager::SendStateAck(plNetworkPredictedComponent& component, const plNetworkConnection& target, plUInt32 uiTick)
@@ -169,7 +169,7 @@ void plNetworkPredictionManager::SendStateAck(plNetworkPredictedComponent& compo
   msg.WriteUInt32(component.GetNetID());
   WriteState(msg, component.m_LastServerState);
   msg.SetChannelType(plNetworkChannelTypeEnum::Unreliable);
-  m_pModule->GetPeer()->SendMessages(msg, target);
+  m_pModule->GetPeer()->SendTo(msg, target).IgnoreResult();
 }
 
 void plNetworkPredictionManager::HandlePredictedInput(plNetworkMessage& msg, const plNetworkConnection& sender)

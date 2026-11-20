@@ -27,11 +27,24 @@ void plNetworkObjectManager::Initialize(plNetworkWorldModule* pNetworkModule)
 }
 
 void plNetworkObjectManager::Shutdown()
-{
-  // Clear all tracked objects (don't destroy them, let world handle that)
+{  // Clear all tracked objects (don't destroy them, let world handle that)
   m_NetworkObjects.Clear();
   m_ObjectToNetworkID.Clear();
   m_pNetworkModule = nullptr;
+}
+
+void plNetworkObjectManager::ResetSession(bool bDeleteObjects)
+{
+  // Objects spawned through the session belong to it, on the server and on every client.
+  if (bDeleteObjects && m_pNetworkModule && m_pNetworkModule->GetWorld())
+  {
+    for (auto it = m_NetworkObjects.GetIterator(); it.IsValid(); ++it)
+      m_pNetworkModule->GetWorld()->DeleteObjectDelayed(it.Value().m_hGameObject);
+  }
+
+  m_NetworkObjects.Clear();
+  m_ObjectToNetworkID.Clear();
+  m_uiNextNetworkID = 1;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -129,16 +142,14 @@ plUInt32 plNetworkObjectManager::SpawnNetworkObject(
     return 0;
   }
 
-  // Generate network ID first so components can use it during spawn
-  plUInt32 networkID = GenerateNetworkID();
-  m_uiPendingSpawnNetworkID = networkID;
+  if (m_uiNextNetworkID > MaxObjectNetID)
+  {
+    plLog::Error("PL Net: Cannot spawn '{}': all {} object NetIDs of this session are used", sPrefabGuid.GetString(), MaxObjectNetID);
+    return 0;
+  }
 
-  // Spawn the prefab locally
+  const plUInt32 networkID = GenerateNetworkID();
   plGameObject* pObject = SpawnPrefabInternal(sPrefabGuid, localTransform, hParent);
-  
-  // Clear pending ID
-  m_uiPendingSpawnNetworkID = 0;
-  
   if (!pObject)
   {
     plLog::Error("PL Net: Failed to spawn prefab '{}'", sPrefabGuid.GetString());
@@ -152,18 +163,12 @@ plUInt32 plNetworkObjectManager::SpawnNetworkObject(
   info.m_uiOwnerClientID = uiOwnerClientID;
   info.m_Authority = authority;
   info.m_sPrefabGuid = sPrefabGuid;
-  info.m_SpawnTime = plTime::Now();
+  info.m_SpawnTime = plNetworkClock::Now();
 
   // Store in tracking tables
   m_NetworkObjects[networkID] = info;
   m_ObjectToNetworkID[pObject->GetHandle()] = networkID;
-
-  // Update component NetIDs for components that were registered during spawn
-  for (auto it = pObject->GetChildren(); it.IsValid(); ++it)
-  {
-    UpdateComponentNetIDs(it, networkID);
-  }
-  UpdateComponentNetIDs(pObject, networkID);
+  AssignComponentNetIDs(pObject, networkID);
 
   // Broadcast post-spawn message to all network components
   {
@@ -306,8 +311,8 @@ bool plNetworkObjectManager::TransferOwnership(plUInt32 uiNetworkID, plUInt32 ui
   plUInt32 oldOwner = pInfo->m_uiOwnerClientID;
   pInfo->m_uiOwnerClientID = uiNewOwnerClientID;
 
-  // Broadcast ownership change
-  if (m_pNetworkModule && m_pNetworkModule->GetPeer())
+  // Every admitted client learns the new owner.
+  if (m_pNetworkModule && m_pNetworkModule->GetPeer() && !m_pNetworkModule->IsClient())
   {
     plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
     plNetworkMessage msg = pPeer->BeginSendMessage();
@@ -318,7 +323,7 @@ bool plNetworkObjectManager::TransferOwnership(plUInt32 uiNetworkID, plUInt32 ui
     msg.WriteUInt8(static_cast<plUInt8>(pInfo->m_Authority.GetValue()));
 
     msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-    pPeer->SendMessages(msg);
+    m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
   }
 
   plLog::Dev("PL Net: Transferred ownership of object {} from {} to {}",
@@ -423,40 +428,11 @@ void plNetworkObjectManager::BroadcastSpawn(const plNetworkObjectInfo& info, con
   if (!m_pNetworkModule || !m_pNetworkModule->GetPeer())
     return;
 
-  plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
-
-  // Get all connected clients
-  plDynamicArray<plNetworkConnection> targets;
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
-  }
-
-  if (targets.IsEmpty())
-    return;
-
-  plNetworkMessage msg = pPeer->BeginSendMessage();
-
-  msg.WriteUInt8(plNetworkMessageIDs::ObjectSpawn);
-  msg.WriteUInt32(info.m_uiNetworkID);
-  msg.WriteUInt32(info.m_uiOwnerClientID);
-  msg.WriteUInt8(static_cast<plUInt8>(info.m_Authority.GetValue()));
-
-  // Write prefab ID for bandwidth optimization
-  plUInt32 prefabID = 0;
-  m_RegisteredPrefabs.TryGetValue(info.m_sPrefabGuid, prefabID);
-  msg.WriteUInt32(prefabID);
-
-  // Write transform
-  msg.WriteVec3(transform.m_vPosition);
-  msg.WriteQuat(transform.m_qRotation);
-  msg.WriteVec3(transform.m_vScale);
-
-  msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg, targets);
+  // Initial state is serialized per recipient, so every client gets its own spawn message.
+  plHybridArray<plNetworkClient*, 32> clients;
+  m_pNetworkModule->GetConnectedClients(clients);
+  for (plNetworkClient* pClient : clients)
+    SendSpawnToClient(info, transform, pClient->m_uiClientID);
 }
 
 void plNetworkObjectManager::SendSpawnToClient(const plNetworkObjectInfo& info, const plTransform& transform, plUInt32 uiClientID)
@@ -468,6 +444,12 @@ void plNetworkObjectManager::SendSpawnToClient(const plNetworkObjectInfo& info, 
   if (!pClient)
     return;
 
+  plGameObject* pObject = nullptr;
+  m_pNetworkModule->GetWorld()->TryGetObject(info.m_hGameObject, pObject);
+
+  plHybridArray<plNetworkComponent*, 16> components;
+  GetSpawnedComponents(pObject, components);
+
   plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
   plNetworkMessage msg = pPeer->BeginSendMessage();
 
@@ -484,8 +466,64 @@ void plNetworkObjectManager::SendSpawnToClient(const plNetworkObjectInfo& info, 
   msg.WriteQuat(transform.m_qRotation);
   msg.WriteVec3(transform.m_vScale);
 
+  // The initial state of every component, length-prefixed and in slot order. One that does not fit follows on its own.
+  plHybridArray<plNetworkComponent*, 4> overflow;
+  msg.WriteUInt16(static_cast<plUInt16>(components.GetCount()));
+  for (plNetworkComponent* pComponent : components)
+  {
+    plNetworkMessage state = pPeer->BeginSendMessage();
+    pComponent->NetworkSerializeForClient(state, uiClientID, true);
+
+    const bool bFits = !state.HasWriteError() && state.m_uiLength <= 0xFFFF &&
+                       msg.m_uiPosition + sizeof(plUInt16) + state.m_uiLength + sizeof(plUInt16) * components.GetCount() <= msg.m_uiBufferSize;
+    if (!bFits)
+    {
+      msg.WriteUInt16(0);
+      overflow.PushBack(pComponent);
+      continue;
+    }
+
+    msg.WriteUInt16(static_cast<plUInt16>(state.m_uiLength));
+    if (state.m_uiLength > 0)
+      msg.WriteBytes(state.m_pBuffer, state.m_uiLength);
+  }
+
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg, pClient->m_Connection);
+  m_pNetworkModule->SendToClient(msg, uiClientID).IgnoreResult();
+
+  // Reliable ordered, so these arrive after the spawn; the client holds them until the component starts.
+  for (plNetworkComponent* pComponent : overflow)
+    m_pNetworkModule->SyncComponentStateToClient(pComponent, pClient);
+}
+
+void plNetworkObjectManager::GetSpawnedComponents(plGameObject* pRoot, plDynamicArray<plNetworkComponent*>& out_components)
+{
+  if (pRoot == nullptr)
+    return;
+
+  for (plComponent* pComponent : pRoot->GetComponents())
+  {
+    if (pComponent->IsInstanceOf<plNetworkComponent>())
+      out_components.PushBack(static_cast<plNetworkComponent*>(pComponent));
+  }
+
+  for (auto it = pRoot->GetChildren(); it.IsValid(); ++it)
+    GetSpawnedComponents(it, out_components);
+}
+
+void plNetworkObjectManager::AssignComponentNetIDs(plGameObject* pRoot, plUInt32 uiObjectNetID)
+{
+  plHybridArray<plNetworkComponent*, 16> components;
+  GetSpawnedComponents(pRoot, components);
+
+  if (components.GetCount() > MaxComponentSlots)
+  {
+    plLog::Error("PL Net: Object {} has {} network components; only the first {} replicate", uiObjectNetID, components.GetCount(), MaxComponentSlots);
+    components.SetCount(MaxComponentSlots);
+  }
+
+  for (plUInt32 uiSlot = 0; uiSlot < components.GetCount(); ++uiSlot)
+    components[uiSlot]->SetNetID(MakeComponentNetID(uiObjectNetID, uiSlot));
 }
 
 void plNetworkObjectManager::BroadcastDespawn(plUInt32 uiNetworkID)
@@ -494,26 +532,13 @@ void plNetworkObjectManager::BroadcastDespawn(plUInt32 uiNetworkID)
     return;
 
   plNetworkPeer* pPeer = m_pNetworkModule->GetPeer();
-
-  plDynamicArray<plNetworkConnection> targets;
-  for (plNetworkClient* pClient : m_pNetworkModule->GetClients())
-  {
-    if (pClient && pClient->m_ConnectionState == plNetworkConnectionState::Connected)
-    {
-      targets.PushBack(pClient->m_Connection);
-    }
-  }
-
-  if (targets.IsEmpty())
-    return;
-
   plNetworkMessage msg = pPeer->BeginSendMessage();
 
   msg.WriteUInt8(plNetworkMessageIDs::ObjectDespawn);
   msg.WriteUInt32(uiNetworkID);
 
   msg.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
-  pPeer->SendMessages(msg, targets);
+  m_pNetworkModule->SendToConnectedClients(msg).IgnoreResult();
 }
 
 void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
@@ -555,11 +580,30 @@ void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
   plVec3 position = msg.ReadVec3();
   plQuat rotation = msg.ReadQuat();
   plVec3 scale = msg.ReadVec3();
-  if (msg.HasReadError() || networkID == 0 || authority > plNetworkObjectRole::ReplicatedSimulated ||
+  if (msg.HasReadError() || networkID == 0 || networkID > MaxObjectNetID || authority > plNetworkObjectRole::ReplicatedSimulated ||
       !position.IsValid() || !rotation.IsValid() || !scale.IsValid())
   {
     msg.MarkReadError();
     return;
+  }
+
+  // The initial state of each component in slot order; all of it is validated before anything is created.
+  const plUInt16 uiStateCount = msg.ReadUInt16();
+  if (msg.HasReadError() || uiStateCount > MaxComponentSlots)
+  {
+    msg.MarkReadError();
+    return;
+  }
+
+  plHybridArray<plArrayPtr<const plUInt8>, 16> states;
+  for (plUInt16 i = 0; i < uiStateCount; ++i)
+  {
+    const plUInt16 uiLength = msg.ReadUInt16();
+    const plUInt8* pState = uiLength > 0 ? static_cast<const plUInt8*>(msg.SkipBytes(uiLength)) : nullptr;
+    if (msg.HasReadError())
+      return;
+
+    states.PushBack(plArrayPtr<const plUInt8>(pState, uiLength));
   }
 
   plTransform transform;
@@ -567,15 +611,7 @@ void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
   transform.m_qRotation = rotation;
   transform.m_vScale = scale;
 
-  // Pre-register the network ID so components can find it during spawn
-  m_uiPendingSpawnNetworkID = networkID;
-
-  // Spawn locally
   plGameObject* pObject = SpawnPrefabInternal(prefabGuid, transform, plGameObjectHandle());
-  
-  // Clear pending ID
-  m_uiPendingSpawnNetworkID = 0;
-  
   if (!pObject)
   {
     plLog::Error("PL Net: Failed to spawn replicated object {}", networkID);
@@ -589,18 +625,23 @@ void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
   info.m_uiOwnerClientID = ownerClientID;
   info.m_Authority = authority;
   info.m_sPrefabGuid = prefabGuid;
-  info.m_SpawnTime = plTime::Now();
+  info.m_SpawnTime = plNetworkClock::Now();
 
   m_NetworkObjects[networkID] = info;
   m_ObjectToNetworkID[pObject->GetHandle()] = networkID;
+  AssignComponentNetIDs(pObject, networkID);
 
-  // Update component NetIDs for components that were registered during spawn
-  // They may have gotten 0 because the mapping wasn't ready yet
-  for (auto it = pObject->GetChildren(); it.IsValid(); ++it)
+  // The components start on a later update; their initial state waits for them.
+  plHybridArray<plNetworkComponent*, 16> components;
+  GetSpawnedComponents(pObject, components);
+  if (components.GetCount() != states.GetCount())
+    plLog::Warning("PL Net: Object {} has {} network components here and {} on the server; check that both use the same prefab", networkID, components.GetCount(), states.GetCount());
+
+  for (plUInt32 i = 0; i < plMath::Min(components.GetCount(), states.GetCount()); ++i)
   {
-    UpdateComponentNetIDs(it, networkID);
+    if (!states[i].IsEmpty())
+      m_pNetworkModule->HoldStateForComponent(components[i]->GetNetID(), m_pNetworkModule->GetServerClientID(), states[i]);
   }
-  UpdateComponentNetIDs(pObject, networkID);
 
   // Update next network ID to avoid conflicts
   if (networkID >= m_uiNextNetworkID)
@@ -704,25 +745,6 @@ void plNetworkObjectManager::SyncAllObjectsToClient(plUInt32 uiClientID)
     {
       plTransform transform = pObject->GetGlobalTransform();
       SendSpawnToClient(info, transform, uiClientID);
-    }
-  }
-}
-
-void plNetworkObjectManager::UpdateComponentNetIDs(plGameObject* pObject, plUInt32 uiNetworkID)
-{
-  if (!pObject || !m_pNetworkModule)
-    return;
-
-  // Find all network components on this object and update their NetID
-  plHybridArray<plNetworkComponent*, 4> components;
-  pObject->TryGetComponentsOfBaseType(components);
-
-  for (plNetworkComponent* pComp : components)
-  {
-    if (pComp->GetNetID() == 0 || pComp->GetNetID() != uiNetworkID)
-    {
-      pComp->SetNetID(uiNetworkID);
-      plLog::Dev("PL Net: Updated component NetID to {} on object '{}'", uiNetworkID, pObject->GetName());
     }
   }
 }

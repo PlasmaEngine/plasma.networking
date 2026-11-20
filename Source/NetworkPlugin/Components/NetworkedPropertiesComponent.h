@@ -66,15 +66,19 @@ public:
   void NetworkSerialize(plNetworkMessage& msg) override;
   void NetworkSerializeForClient(plNetworkMessage& msg, plUInt32 uiRecipientClientID, bool bInitialSync) override;
   void NetworkDeserialize(plNetworkMessage& msg) override;
+  void NetworkRelayForClient(plNetworkMessage& in_received, plNetworkMessage& out_msg, plUInt32 uiRecipientClientID) override;
   bool RequiresPerRecipientSerialization() const override { return true; }
 
   void OnNetworkStateChanged(plNetworkConnectionState::Enum state) override;
+  void OnClientDisconnected(plNetworkClient* pClient) override;
 
 protected:
   void OnSimulationStarted() override;
   void Update() override;
 
 private:
+  friend class plNetworkTestAccess;
+
   struct ResolvedEntry
   {
     enum class Kind : plUInt8
@@ -103,7 +107,11 @@ private:
   plUInt32 GetOwnerClientID() const;
   plNetworkReplicationProfileDescriptor GetSettings(plUInt32 uiEntry) const;
   plVariant GetCurrentValue(const ResolvedEntry& entry) const;
-  void WriteValue(plNetworkMessage& msg, const ResolvedEntry& entry, plNetSerializeEncoding::Enum encoding) const;
+
+  /// \brief The value to send: the received target while a value is still blending in, the current value otherwise.
+  plVariant GetReplicatedValue(const ResolvedEntry& entry) const;
+  bool IsSentTo(plUInt32 uiEntry, plUInt32 uiRecipientClientID, plUInt32 uiOwnerClientID) const;
+  void WriteValue(plNetworkMessage& msg, const ResolvedEntry& entry, const plVariant& value, plNetSerializeEncoding::Enum encoding) const;
   plVariant ReadValue(plNetworkMessage& msg, const ResolvedEntry& entry, plNetSerializeEncoding::Enum encoding) const;
   void ApplyValue(ResolvedEntry& entry, const plVariant& value);
 
@@ -115,6 +123,7 @@ private:
   void TickInterpolation();
 
   plDynamicArray<ResolvedEntry> m_ResolvedEntries;
+  bool m_bEntriesResolved = false; ///< Resolved on first use: a spawned object serializes its state before it starts.
   plMap<plUInt32, plDynamicArray<plVariant>> m_LastSentValues;
   plMap<plUInt32, plDynamicArray<plTime>> m_LastSentTimes;
   plTime m_LastPollTime;
