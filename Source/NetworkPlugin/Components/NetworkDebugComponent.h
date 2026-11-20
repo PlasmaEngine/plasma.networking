@@ -15,6 +15,9 @@ public:
   plNetworkDebugComponent() = default;
   virtual ~plNetworkDebugComponent() = default;
 
+  void SerializeComponent(plWorldWriter& inout_stream) const override;
+  void DeserializeComponent(plWorldReader& inout_stream) override;
+
   // plNetworkComponent interface
   virtual void NetworkSerialize(plNetworkMessage& msg) override {}
   virtual void NetworkDeserialize(plNetworkMessage& msg) override {}

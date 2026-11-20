@@ -44,19 +44,28 @@ void plDriverSimulated::Shutdown()
   m_OpenConnections.Clear();
 }
 
-void plDriverSimulated::Disconnect()
+void plDriverSimulated::Disconnect(plUInt32 uiReason)
 {
   FlushOutgoingFor(nullptr);
   m_pTransport->Flush();
-  m_pTransport->Disconnect();
+  m_pTransport->Disconnect(uiReason);
   m_OpenConnections.Clear();
 }
 
-void plDriverSimulated::Disconnect(const plNetworkConnection& connection)
+void plDriverSimulated::DisconnectAll(plUInt32 uiReason)
+{
+  FlushOutgoingFor(nullptr);
+  m_pTransport->Flush();
+  m_pTransport->DisconnectAll(uiReason);
+  m_OpenConnections.Clear();
+  m_Incoming.Clear();
+}
+
+void plDriverSimulated::Disconnect(const plNetworkConnection& connection, plUInt32 uiReason)
 {
   FlushOutgoingFor(&connection);
   m_pTransport->Flush();
-  m_pTransport->Disconnect(connection);
+  m_pTransport->Disconnect(connection, uiReason);
   m_OpenConnections.Remove(connection.m_uiConnectionID);
 
   for (plUInt32 i = m_Incoming.GetCount(); i > 0; --i)
@@ -126,6 +135,7 @@ void plDriverSimulated::ScheduleIncoming(const plNetworkEvent& event)
   Queued item;
   item.m_EventType = event.m_EventType;
   item.m_Connection = event.m_Sender;
+  item.m_uiData = event.m_uiData;
   item.m_DeliveryTime = now;
 
   if (event.m_EventType == plNetworkEventTypeEnum::Message)
@@ -224,6 +234,7 @@ plResult plDriverSimulated::PopEvent(plNetworkEvent& event)
 
     event.m_EventType = item.m_EventType;
     event.m_Sender = item.m_Connection;
+    event.m_uiData = item.m_uiData;
     event.m_Message = plNetworkMessage();
 
     if (item.m_EventType == plNetworkEventTypeEnum::Message)

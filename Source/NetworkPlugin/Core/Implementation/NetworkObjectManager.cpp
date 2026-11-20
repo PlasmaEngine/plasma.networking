@@ -33,6 +33,20 @@ void plNetworkObjectManager::Shutdown()
   m_pNetworkModule = nullptr;
 }
 
+void plNetworkObjectManager::ResetSession(bool bDeleteObjects)
+{
+  // Objects spawned through the session belong to it, on the server and on every client.
+  if (bDeleteObjects && m_pNetworkModule && m_pNetworkModule->GetWorld())
+  {
+    for (auto it = m_NetworkObjects.GetIterator(); it.IsValid(); ++it)
+      m_pNetworkModule->GetWorld()->DeleteObjectDelayed(it.Value().m_hGameObject);
+  }
+
+  m_NetworkObjects.Clear();
+  m_ObjectToNetworkID.Clear();
+  m_uiNextNetworkID = 1;
+}
+
 //////////////////////////////////////////////////////////////////////////
 // Prefab Registration
 //////////////////////////////////////////////////////////////////////////

@@ -140,20 +140,26 @@ plResult plNetworkPeer::Connect()
   m_Role = plNetworkRoleEnum::Client;
   return m_pDriver->Connect();
 }
-void plNetworkPeer::Disconnect()
+void plNetworkPeer::Disconnect(plUInt32 uiReason)
 {
   plLog::Info("PL Net: Network Peer Disconnecting");
 
   // The disconnect message and anything else queued go out before the connection closes.
   Flush();
-  m_pDriver->Disconnect();
+  m_pDriver->Disconnect(uiReason);
 }
 
-void plNetworkPeer::Disconnect(const plNetworkConnection& connection)
+void plNetworkPeer::Disconnect(const plNetworkConnection& connection, plUInt32 uiReason)
 {
   plLog::Info("PL Net: Network Peer Disconnecting");
   Flush();
-  m_pDriver->Disconnect(connection);
+  m_pDriver->Disconnect(connection, uiReason);
+}
+
+void plNetworkPeer::DisconnectAll(plUInt32 uiReason)
+{
+  Flush();
+  m_pDriver->DisconnectAll(uiReason);
 }
 plResult plNetworkPeer::PopEvent(plNetworkEvent& event)
 {

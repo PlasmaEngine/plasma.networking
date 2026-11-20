@@ -98,7 +98,9 @@ plNetworkWorldModule::plNetworkWorldModule(plWorld* pWorld)
 
 plNetworkWorldModule::~plNetworkWorldModule()
 {
+  m_bDestroying = true;
   m_NetworkComponents.Clear();
+  m_ComponentsByNetID.Clear();
   m_NetworkObjects.Clear();
   Stop();
   m_Session.Shutdown();
@@ -348,17 +350,23 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   }
 
   PL_PROFILE_SCOPE("Network Stop");
+
+  // A host or dedicated server that stops without a reason of its own is shutting the session down.
+  if (m_Role != plNetworkRoleEnum::Client && reason == plNetworkDisconnectReason::ClientQuit)
+    reason = plNetworkDisconnectReason::ServerShutdown;
+
   plLog::Dev("Stopping Network (reason: {})", static_cast<plUInt8>(reason));
   m_LastDisconnectReason = reason;
 
-  // Broadcast disconnect reason to all connected clients
-  if (m_pPeer && m_Role == plNetworkRoleEnum::Host)
-  {
-    BroadcastDisconnect(reason);
-  }
-  else if (m_pPeer && m_Role == plNetworkRoleEnum::Client)
+  // Every admitted client, or the server, learns why; the peer sends it before the connections close.
+  if (m_pPeer && m_Role == plNetworkRoleEnum::Client)
   {
     SendDisconnect(reason);
+  }
+  else if (m_pPeer)
+  {
+    BroadcastDisconnect(reason);
+    m_pPeer->DisconnectAll(reason);
   }
 
   m_Status = plNetworkConnectionState::Disconnecting;
@@ -397,6 +405,11 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
   StopPeer();
   m_LevelManager.Shutdown();
   m_LevelManager.Initialize(this);
+
+  // The next session starts clean: no objects or NetIDs, no clock offset, no held messages.
+  m_ObjectManager.ResetSession(!m_bDestroying);
+  m_NetworkTime.Initialize(this);
+  m_ReplicationAccumulator = plTime::MakeZero();
 
   m_HeldMessages.Clear();
   m_HeldReady.Clear();
@@ -588,7 +601,8 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           if (event.m_Sender.m_uiConnectionID == 0 || GetClient(event.m_Sender) != nullptr ||
               m_pClients.GetCount() >= m_Config.m_uiConnectionLimit || m_uiNextClientID == 0)
           {
-            m_pPeer->Disconnect(event.m_Sender);
+            const bool bFull = m_pClients.GetCount() >= m_Config.m_uiConnectionLimit;
+            m_pPeer->Disconnect(event.m_Sender, bFull ? plNetworkDisconnectReason::ServerFull : plNetworkDisconnectReason::Unknown);
             break;
           }
           plNetworkClient* pClient = PL_DEFAULT_NEW(plNetworkClient);
@@ -607,7 +621,11 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
         plLog::Info("Client Disconnected with ID: {}", event.m_Sender.m_uiConnectionID);
         if (IsClient())
         {
-          Stop();
+          // The server's reason travels with the disconnect; without one the connection was lost.
+          plNetworkDisconnectReason::Enum reason = event.m_EventType == plNetworkEventTypeEnum::Timeout ? plNetworkDisconnectReason::Timeout : plNetworkDisconnectReason::Unknown;
+          if (event.m_uiData > plNetworkDisconnectReason::Unknown && event.m_uiData <= plNetworkDisconnectReason::Banned)
+            reason = static_cast<plNetworkDisconnectReason::Enum>(event.m_uiData);
+          Stop(reason);
           return;
         }
         else
@@ -619,13 +637,9 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
             break;
           }
 
-          pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
           plLog::Dev("Client Disconnected with ID: {}", event.m_Sender.m_uiConnectionID);
           m_pClients.RemoveAndCopy(pClient);
-          if (pClient->m_bAdmissionNotified)
-            BroadcastClientDisconnected(pClient);
-          pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
-          PL_DEFAULT_DELETE(pClient);
+          RemoveClient(pClient, pClient->m_bAdmissionNotified);
         }
         break;
       }
@@ -1321,7 +1335,7 @@ void plNetworkWorldModule::HandleHandshake(plNetworkEvent& event, plNetworkClien
   {
     plLog::Warning("Client {0} connection failed", pClient->m_uiClientID);
     pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-    m_pPeer->Disconnect(event.m_Sender);
+    m_pPeer->Disconnect(event.m_Sender, replyMessage.m_Reason);
     pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
   }
   else
@@ -1381,7 +1395,7 @@ void plNetworkWorldModule::HandleHandshakeReply(plNetworkEvent& event, plNetwork
   if (!msgData.m_bSuccess || msgData.m_uiProtocolVersion != NETWORK_PROTOCOL_VERSION || msgData.m_uiClientID == 0)
   {
     plLog::Warning("Server rejected connection");
-    Stop();
+    Stop(msgData.m_bSuccess ? plNetworkDisconnectReason::VersionMismatch : msgData.m_Reason);
     return;
   }
 
@@ -1492,7 +1506,7 @@ void plNetworkWorldModule::StopPeer()
   PL_PROFILE_SCOPE("Network Stop Peer");
   if (m_Role == plNetworkRoleEnum::Client)
   {
-    m_pPeer->Disconnect();
+    m_pPeer->Disconnect(m_LastDisconnectReason);
   }
   plNetworkPeer::DestroyPeer(m_pPeer);
   m_pPeer = nullptr;
@@ -1523,16 +1537,29 @@ void plNetworkWorldModule::CheckClientTimeouts()
 
       // Disconnect the client
       pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-      m_pPeer->Disconnect(pClient->m_Connection);
+      m_pPeer->Disconnect(pClient->m_Connection, plNetworkDisconnectReason::Timeout);
 
-      // Notify and cleanup
       m_pClients.RemoveAtAndCopy(i);
-      if (bAdmitted || pClient->m_bAdmissionNotified)
-        BroadcastClientDisconnected(pClient);
-      pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
-      PL_DEFAULT_DELETE(pClient);
+      RemoveClient(pClient, bAdmitted || pClient->m_bAdmissionNotified);
     }
   }
+}
+
+void plNetworkWorldModule::RemoveClient(plNetworkClient* pClient, bool bNotify)
+{
+  // Everything the session keeps for this client goes with it: its objects, its place in a level load, its records.
+  pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
+  if (bNotify)
+    BroadcastClientDisconnected(pClient);
+
+  if (m_Config.m_bDespawnObjectsOfLeavingClients && !IsClient())
+    m_ObjectManager.DespawnObjectsOwnedBy(pClient->m_uiClientID);
+
+  m_LevelManager.OnClientDisconnected(pClient->m_uiClientID);
+  m_NetworkTime.OnClientDisconnected(pClient->m_uiClientID);
+
+  pClient->m_ConnectionState = plNetworkConnectionState::Disconnected;
+  PL_DEFAULT_DELETE(pClient);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1776,7 +1803,7 @@ void plNetworkWorldModule::KickClient(plUInt32 uiClientID, plNetworkDisconnectRe
   // Disconnect sends what is queued, the reason included, before it closes. Admission state is revoked before
   // any subsequent event; the record is reclaimed after dispatch, not while it is in use.
   pClient->m_ConnectionState = plNetworkConnectionState::Disconnecting;
-  m_pPeer->Disconnect(pClient->m_Connection);
+  m_pPeer->Disconnect(pClient->m_Connection, reason);
   pClient->m_bReservedForReconnect = false;
 }
 
@@ -1885,9 +1912,8 @@ void plNetworkWorldModule::CleanupExpiredReconnectSlots()
     if (pClient && pClient->m_bReservedForReconnect && now > pClient->m_ReconnectExpiry)
     {
       plLog::Dev("PL Net: Reconnection window expired for client {}", pClient->m_uiClientID);
-      BroadcastClientDisconnected(pClient);
-      PL_DEFAULT_DELETE(pClient);
       m_pClients.RemoveAtAndSwap(i - 1);
+      RemoveClient(pClient, true);
     }
   }
 }

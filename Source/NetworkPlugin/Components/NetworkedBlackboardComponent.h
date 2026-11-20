@@ -34,6 +34,9 @@ public:
   plNetworkedBlackboardComponent();
   virtual ~plNetworkedBlackboardComponent() = default;
 
+  void SerializeComponent(plWorldWriter& inout_stream) const override;
+  void DeserializeComponent(plWorldReader& inout_stream) override;
+
   virtual void NetworkSerialize(plNetworkMessage& msg) override;
   virtual void NetworkSerializeForClient(plNetworkMessage& msg, plUInt32 uiRecipientClientID, bool bInitialSync) override;
   virtual void NetworkDeserialize(plNetworkMessage& msg) override;

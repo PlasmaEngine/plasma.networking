@@ -70,6 +70,7 @@ public:
   bool RequiresPerRecipientSerialization() const override { return true; }
 
   void OnNetworkStateChanged(plNetworkConnectionState::Enum state) override;
+  void OnClientDisconnected(plNetworkClient* pClient) override;
 
 protected:
   void OnSimulationStarted() override;

@@ -59,6 +59,9 @@ public:
   /// @brief (Server) Handle a LevelLoadComplete message from a client
   void HandleLevelLoadComplete(plUInt32 uiClientID, plUInt64 uiGeneration);
 
+  /// @brief (Server) A client that left is no longer waited for.
+  void OnClientDisconnected(plUInt32 uiClientID);
+
   /// @brief (Server) Sync level state to a late-joining client
   void SyncLevelToClient(plUInt32 uiClientID);
 

@@ -29,8 +29,9 @@ public:
   PL_NODISCARD plResult Listen() override { return m_pTransport->Listen(); }
   PL_NODISCARD plResult Connect() override { return m_pTransport->Connect(); }
 
-  void Disconnect() override;
-  void Disconnect(const plNetworkConnection& connection) override;
+  void Disconnect(plUInt32 uiReason = 0) override;
+  void Disconnect(const plNetworkConnection& connection, plUInt32 uiReason = 0) override;
+  void DisconnectAll(plUInt32 uiReason) override;
 
   PL_NODISCARD plResult PopEvent(plNetworkEvent& event) override;
   void Flush() override;
@@ -56,6 +57,7 @@ private:
     plNetworkEventTypeEnum::Enum m_EventType = plNetworkEventTypeEnum::Message;
     plNetworkChannelTypeEnum::Enum m_Channel = plNetworkChannelTypeEnum::None;
     plNetworkConnection m_Connection;
+    plUInt32 m_uiData = 0;      ///< The disconnect reason of a Disconnected event.
     bool m_bClientForm = false; ///< Sent with the no-target overload.
     plUInt32 m_uiSequence = 0;  ///< Order of unreliable sequenced messages on their link.
     plDynamicArray<plUInt8> m_Data;

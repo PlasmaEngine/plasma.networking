@@ -173,6 +173,13 @@ void plNetworkLevelManager::HandleLevelLoadComplete(plUInt32 uiClientID, plUInt6
   plLog::Dev("PL Net LevelManager: Client {} finished loading. {} pending.", uiClientID, m_PendingClients.GetCount());
 }
 
+void plNetworkLevelManager::OnClientDisconnected(plUInt32 uiClientID)
+{
+  // Update() starts the level once nobody is pending, so the remaining clients do not wait for the timeout.
+  m_PendingClients.Remove(uiClientID);
+  m_LoadedClients.Remove(uiClientID);
+}
+
 void plNetworkLevelManager::SyncLevelToClient(plUInt32 uiClientID)
 {
   if (!m_pNetworkModule || !(m_pNetworkModule->IsServer() || m_pNetworkModule->IsHost()))

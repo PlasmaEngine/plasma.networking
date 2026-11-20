@@ -49,6 +49,10 @@ public:
   /// @brief Shutdown and cleanup all tracked objects
   void Shutdown();
 
+  /// @brief Ends the session's objects: forgets every tracked object, deletes it from the world when bDeleteObjects is
+  /// set, and starts object NetIDs at 1 again. Registered prefabs stay.
+  void ResetSession(bool bDeleteObjects);
+
   //////////////////////////////////////////////////////////////////////////
   // Prefab Registration
   //////////////////////////////////////////////////////////////////////////

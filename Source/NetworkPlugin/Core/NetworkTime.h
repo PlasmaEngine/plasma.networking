@@ -103,6 +103,9 @@ public:
   /// @brief Handle incoming time sync request (server-side)
   void HandleTimeSyncRequest(plNetworkMessage& msg, plUInt32 uiClientID);
 
+  /// @brief Server side: forgets the rate-limit record of a client that left.
+  void OnClientDisconnected(plUInt32 uiClientID) { m_LastServerResponseByClient.Remove(uiClientID); }
+
   /// @brief Handle incoming time sync response (client-side)
   void HandleTimeSyncResponse(plNetworkMessage& msg);
 

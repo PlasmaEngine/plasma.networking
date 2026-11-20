@@ -38,9 +38,14 @@ public:
 
   PL_NODISCARD plResult Connect();
 
-  void Disconnect();
+  /// \brief Closes connections after sending what is queued. uiReason (a plNetworkDisconnectReason) travels with the
+  /// disconnect where the transport can carry it.
+  void Disconnect(plUInt32 uiReason = 0);
 
-  void Disconnect(const plNetworkConnection& connection);
+  void Disconnect(const plNetworkConnection& connection, plUInt32 uiReason = 0);
+
+  /// \brief Server side: closes every connection.
+  void DisconnectAll(plUInt32 uiReason);
 
   PL_NODISCARD plResult PopEvent(plNetworkEvent& event);
 

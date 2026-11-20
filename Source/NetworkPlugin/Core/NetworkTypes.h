@@ -145,6 +145,9 @@ public:
   /// \brief Created lobby is listed publicly; otherwise joinable by id only.
   bool m_bLobbyPublic = true;
 
+  /// \brief Server side: the objects a client owns are despawned when it leaves.
+  bool m_bDespawnObjectsOfLeavingClients = true;
+
   /// \brief Network conditions this peer simulates on everything it sends and receives. While disabled, the peer follows
   /// the net_sim_* CVars instead.
   plNetworkSimulationSettings m_Simulation;

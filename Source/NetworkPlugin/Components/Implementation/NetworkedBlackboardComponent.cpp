@@ -9,6 +9,8 @@
 #include <NetworkPlugin/NetworkPluginPCH.h>
 
 #include <NetworkPlugin/Components/NetworkedBlackboardComponent.h>
+#include <Core/WorldSerializer/WorldReader.h>
+#include <Core/WorldSerializer/WorldWriter.h>
 #include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/Containers/HashSet.h>
 #include <Foundation/IO/MemoryStream.h>
@@ -53,7 +55,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plNetworkBlackboardAuthority, 1)
   PL_ENUM_CONSTANTS(plNetworkBlackboardAuthority::ServerAuthoritative, plNetworkBlackboardAuthority::OwnerWritable)
 PL_END_STATIC_REFLECTED_ENUM;
 
-PL_BEGIN_COMPONENT_TYPE(plNetworkedBlackboardComponent, 1, plComponentMode::Dynamic)
+PL_BEGIN_COMPONENT_TYPE(plNetworkedBlackboardComponent, 2, plComponentMode::Dynamic)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -74,6 +76,34 @@ PL_END_COMPONENT_TYPE
 // clang-format on
 
 plNetworkedBlackboardComponent::plNetworkedBlackboardComponent() = default;
+
+void plNetworkedBlackboardComponent::SerializeComponent(plWorldWriter& inout_stream) const
+{
+  SUPER::SerializeComponent(inout_stream);
+  plStreamWriter& s = inout_stream.GetStream();
+
+  s << static_cast<plUInt8>(m_Authority.GetValue());
+  s << m_fSendRate;
+  s << m_sBlackboardName;
+  s << m_bReplicateSaveFlaggedOnly;
+  s << m_bSyncEntryFlags;
+}
+
+void plNetworkedBlackboardComponent::DeserializeComponent(plWorldReader& inout_stream)
+{
+  SUPER::DeserializeComponent(inout_stream);
+  if (inout_stream.GetComponentTypeVersion(GetStaticRTTI()) < 2)
+    return; // exported before this component wrote any data; re-transform the scene
+
+  plStreamReader& s = inout_stream.GetStream();
+  plUInt8 uiAuthority = 0;
+  s >> uiAuthority;
+  m_Authority = static_cast<plNetworkBlackboardAuthority::Enum>(uiAuthority);
+  s >> m_fSendRate;
+  s >> m_sBlackboardName;
+  s >> m_bReplicateSaveFlaggedOnly;
+  s >> m_bSyncEntryFlags;
+}
 
 void plNetworkedBlackboardComponent::ResolveBlackboard()
 {

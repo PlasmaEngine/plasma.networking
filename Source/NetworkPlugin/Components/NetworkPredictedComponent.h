@@ -16,6 +16,9 @@ public:
   float m_fVisualSmoothingHalfLife = 0.1f;
   bool m_bShowDebugGhosts = false;
 
+  void SerializeComponent(plWorldWriter& inout_stream) const override;
+  void DeserializeComponent(plWorldReader& inout_stream) override;
+
   const plVec3& GetVisualSmoothingOffset() const { return m_vVisualSmoothingOffset; }
   const plNetworkPredictionState& GetLastServerState() const { return m_LastServerState; }
 

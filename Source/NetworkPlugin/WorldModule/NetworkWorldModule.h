@@ -310,6 +310,9 @@ private:
   void HoldMessage(HeldMessage::Kind kind, plUInt32 uiComponentNetID, plUInt32 uiSenderClientID, plArrayPtr<const plUInt8> data);
   void ReleaseHeldMessages();
 
+  /// @brief Server side: everything that goes when a client leaves, for every way it can leave. Deletes the record.
+  void RemoveClient(plNetworkClient* pClient, bool bNotify);
+
   bool IsReplicationTick(plTime now);
   bool ShouldSendComponent(plNetworkComponent* pComponent) const;
   plResult SendComponentState(plNetworkComponent* pComponent);
@@ -348,6 +351,7 @@ private:
   bool m_bUpdating = false;
   bool m_bStopping = false;
   bool m_bStopRequested = false;
+  bool m_bDestroying = false; ///< The world is going away: Stop() leaves its objects to it.
   plNetworkDisconnectReason::Enum m_DeferredStopReason = plNetworkDisconnectReason::ClientQuit;
   plNetworkDisconnectReason::Enum m_LastDisconnectReason = plNetworkDisconnectReason::Unknown;
   plEnum<plNetworkRoleEnum> m_Role = plNetworkRoleEnum::Undefined;

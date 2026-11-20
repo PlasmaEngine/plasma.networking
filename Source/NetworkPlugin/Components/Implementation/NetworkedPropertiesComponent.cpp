@@ -665,7 +665,20 @@ void plNetworkedPropertiesComponent::OnNetworkStateChanged(plNetworkConnectionSt
   plNetworkComponent::OnNetworkStateChanged(state);
 
   if (state == plNetworkConnectionState::Disconnected || state == plNetworkConnectionState::Offline)
+  {
     RestoreRemotePhysics();
+    m_LastSentValues.Clear();
+    m_LastSentTimes.Clear();
+  }
+}
+
+void plNetworkedPropertiesComponent::OnClientDisconnected(plNetworkClient* pClient)
+{
+  plNetworkComponent::OnClientDisconnected(pClient);
+
+  // Client IDs are not reused, so what was sent to one that left is never compared against again.
+  m_LastSentValues.Remove(pClient->m_uiClientID);
+  m_LastSentTimes.Remove(pClient->m_uiClientID);
 }
 
 PL_STATICLINK_FILE(NetworkPlugin, NetworkPlugin_Components_Implementation_NetworkedPropertiesComponent);

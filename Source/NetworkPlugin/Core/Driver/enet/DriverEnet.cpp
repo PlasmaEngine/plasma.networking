@@ -129,27 +129,42 @@ plResult plDriverEnet::Connect()
   return PL_SUCCESS;
 }
 
-void plDriverEnet::Disconnect()
+void plDriverEnet::Disconnect(plUInt32 uiReason)
 {
   if(m_pEnetPeer)
   {
-    enet_peer_disconnect_now(m_pEnetPeer, 0);
+    enet_peer_disconnect_now(m_pEnetPeer, uiReason);
     m_pEnetPeer = nullptr;
     plLog::Info("ENet: Disconnected.");
   }
 }
 
-void plDriverEnet::Disconnect(const plNetworkConnection& connection)
+void plDriverEnet::Disconnect(const plNetworkConnection& connection, plUInt32 uiReason)
 {
   ENetPeer* peer;
 
   if(m_PeerMap.TryGetValue(connection.m_uiConnectionID, peer))
   {
-    enet_peer_disconnect_now(peer, 0);
+    enet_peer_disconnect_now(peer, uiReason);
     m_ConnectionIDs.Remove(peer);
     m_PeerMap.Remove(connection.m_uiConnectionID);
     plLog::Info("ENet: Disconnected Id: {}.", connection.m_uiConnectionID);
   }
+}
+
+void plDriverEnet::DisconnectAll(plUInt32 uiReason)
+{
+  if (m_pEnetPeer)
+  {
+    Disconnect(uiReason);
+    return;
+  }
+
+  for (auto it = m_PeerMap.GetIterator(); it.IsValid(); ++it)
+    enet_peer_disconnect_now(it.Value(), uiReason);
+
+  m_PeerMap.Clear();
+  m_ConnectionIDs.Clear();
 }
 
 plResult plDriverEnet::PopEvent(plNetworkEvent& event)
@@ -198,6 +213,7 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
       }
     }
     event.m_Sender.m_uiConnectionID = connectionId;
+    event.m_uiData = enetEvent.type == ENET_EVENT_TYPE_DISCONNECT ? enetEvent.data : 0;
 
     switch (enetEvent.type)
     {

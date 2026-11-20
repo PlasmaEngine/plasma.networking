@@ -21,4 +21,7 @@ public:
 
   /// \brief This is the connection to the client who produced the event in question.
   plNetworkConnection m_Sender;
+
+  /// \brief For Disconnected: the plNetworkDisconnectReason the other side gave, 0 when it gave none.
+  plUInt32 m_uiData = 0;
 };

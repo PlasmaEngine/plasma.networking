@@ -2,11 +2,13 @@
 
 #include <NetworkPlugin/Components/NetworkedRigidbodyComponent.h>
 #include <NetworkPlugin/Core/NetworkObjectManager.h>
+#include <Core/WorldSerializer/WorldReader.h>
+#include <Core/WorldSerializer/WorldWriter.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 
 // clang-format off
-PL_BEGIN_COMPONENT_TYPE(plNetworkedRigidbodyComponent, 1, plComponentMode::Dynamic)
+PL_BEGIN_COMPONENT_TYPE(plNetworkedRigidbodyComponent, 2, plComponentMode::Dynamic)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -51,6 +53,30 @@ void plNetworkedRigidbodyComponent::OnSimulationStarted()
       MakePhysicsKinematic(true);
     }
   }
+}
+
+void plNetworkedRigidbodyComponent::SerializeComponent(plWorldWriter& inout_stream) const
+{
+  SUPER::SerializeComponent(inout_stream);
+  plStreamWriter& s = inout_stream.GetStream();
+
+  s << m_fInterpolationSpeed;
+  s << m_fTeleportThreshold;
+  s << m_bSyncVelocity;
+  s << m_bSyncAngularVelocity;
+}
+
+void plNetworkedRigidbodyComponent::DeserializeComponent(plWorldReader& inout_stream)
+{
+  SUPER::DeserializeComponent(inout_stream);
+  if (inout_stream.GetComponentTypeVersion(GetStaticRTTI()) < 2)
+    return; // exported before this component wrote any data; re-transform the scene
+
+  plStreamReader& s = inout_stream.GetStream();
+  s >> m_fInterpolationSpeed;
+  s >> m_fTeleportThreshold;
+  s >> m_bSyncVelocity;
+  s >> m_bSyncAngularVelocity;
 }
 
 bool plNetworkedRigidbodyComponent::HasStateAuthority() const

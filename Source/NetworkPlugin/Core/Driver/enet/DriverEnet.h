@@ -23,9 +23,10 @@ public:
 
   PL_NODISCARD plResult Connect() override;
 
-  void Disconnect() override;
+  void Disconnect(plUInt32 uiReason = 0) override;
+  void DisconnectAll(plUInt32 uiReason) override;
 
-  void Disconnect(const plNetworkConnection& connection) override;
+  void Disconnect(const plNetworkConnection& connection, plUInt32 uiReason = 0) override;
 
   PL_NODISCARD plResult PopEvent(plNetworkEvent& event) override;
 
