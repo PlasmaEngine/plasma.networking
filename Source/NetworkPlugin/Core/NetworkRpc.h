@@ -179,20 +179,31 @@ private:
   /// @brief Generate unique RPC ID from component type and function name
   plUInt32 GenerateRpcID(const plRTTI* pComponentType, plStringView sFunctionName);
 
+  void RegisterRpcInfo(const plRTTI* pComponentType, const plAbstractFunctionProperty* pFunction, plNetworkRpcTarget::Enum target,
+    plNetworkRpcReliability::Enum reliability);
+
+  /// @brief Server side: runs the server's part of a call and sends it to the clients its target names, except the caller.
+  void RouteOnServer(const plNetworkRpcInfo& rpcInfo, plComponent* pComponent, plUInt32 uiOwnerClientID, plArrayPtr<plVariant> arguments,
+    const plNetworkMessage& msg, plUInt32 uiCallerClientID, const plDynamicArray<plUInt32>& targetClients);
+
+  void Execute(const plNetworkRpcInfo& rpcInfo, plComponent* pComponent, plArrayPtr<plVariant> arguments);
+  plUInt32 GetOwnerOf(plComponent* pComponent, plUInt32 uiNetID) const;
+
+  /// @brief Converts the arguments to the function's parameter types; fails for an argument that does not convert.
+  plResult ConvertArguments(const plNetworkRpcInfo& rpcInfo, plArrayPtr<plVariant> arguments, plDynamicArray<plVariant>& out_arguments) const;
+
   /// @brief Serialize RPC arguments to network message
   void SerializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plArrayPtr<plVariant> arguments);
 
-  /// @brief Deserialize RPC arguments from network message
-  void DeserializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plDynamicArray<plVariant>& out_arguments);
+  /// @brief Reads the arguments; false when their count or types do not match the function. A message that ends early
+  /// or holds an unknown type sets the read error.
+  bool DeserializeArguments(plNetworkMessage& msg, const plAbstractFunctionProperty* pFunction, plDynamicArray<plVariant>& out_arguments);
 
   /// @brief Write a variant to network message
   void WriteVariant(plNetworkMessage& msg, const plVariant& value);
 
-  /// @brief Read a variant from network message
-  plVariant ReadVariant(plNetworkMessage& msg, const plRTTI* pExpectedType);
-
-  /// @brief Check if the local machine should execute this RPC
-  bool ShouldExecuteLocally(const plNetworkRpcInfo& rpcInfo, plUInt32 uiSenderClientID, plUInt32 uiOwnerClientID) const;
+  /// @brief Reads a variant as the type it was written as; out_bTypeMatches tells whether that is the expected type.
+  plVariant ReadVariant(plNetworkMessage& msg, const plRTTI* pExpectedType, bool& out_bTypeMatches);
 
   /// @brief Get the channel type for RPC reliability
   plNetworkChannelTypeEnum::Enum GetChannelType(plNetworkRpcReliability::Enum reliability) const;

@@ -35,6 +35,7 @@ public:
   virtual ~plNetworkedBlackboardComponent() = default;
 
   virtual void NetworkSerialize(plNetworkMessage& msg) override;
+  virtual void NetworkSerializeForClient(plNetworkMessage& msg, plUInt32 uiRecipientClientID, bool bInitialSync) override;
   virtual void NetworkDeserialize(plNetworkMessage& msg) override;
   virtual void OnNetworkStateChanged(plNetworkConnectionState::Enum state) override;
 
@@ -44,6 +45,7 @@ protected:
 
 private:
   void ResolveBlackboard();
+  void WriteEntries(plNetworkMessage& msg, bool bFullSnapshot) const;
   bool HasReplicationAuthority() const;
   bool ShouldReplicateEntry(const plBlackboard::Entry& entry) const;
   bool HasEntryChanges() const;

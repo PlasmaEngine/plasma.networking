@@ -10,6 +10,7 @@
 
 #include <NetworkPlugin/Components/NetworkedBlackboardComponent.h>
 #include <Foundation/Algorithm/HashingUtils.h>
+#include <Foundation/Containers/HashSet.h>
 #include <Foundation/IO/MemoryStream.h>
 #include <Foundation/IO/Stream.h>
 #include <GameEngine/Gameplay/BlackboardComponent.h>
@@ -138,6 +139,13 @@ bool plNetworkedBlackboardComponent::HasEntryChanges() const
       return true;
   }
 
+  // An entry that was sent and is gone has to be removed on the other peers.
+  for (auto it = m_LastEntryChangeCounters.GetIterator(); it.IsValid(); ++it)
+  {
+    if (!m_pBoard->GetAllEntries().Contains(it.Key()))
+      return true;
+  }
+
   return false;
 }
 
@@ -237,16 +245,14 @@ void plNetworkedBlackboardComponent::Update()
   MarkDirty();
 }
 
-void plNetworkedBlackboardComponent::NetworkSerialize(plNetworkMessage& msg)
+void plNetworkedBlackboardComponent::WriteEntries(plNetworkMessage& msg, bool bFullSnapshot) const
 {
-  if (!m_pBoard)
-    ResolveBlackboard();
-
-  const bool bFullSnapshot = m_bForceFullSnapshot;
+  // Layout: full-snapshot flag, entry count, entries (name, flags, value), removed count, removed names. A full snapshot
+  // replaces every replicated entry on the receiver, so it lists no removals.
   msg.WriteUInt8(bFullSnapshot ? 1 : 0);
 
   plHybridArray<plHashedString, 32> entriesToSend;
-
+  plHybridArray<plHashedString, 8> removed;
   if (m_pBoard)
   {
     for (auto it = m_pBoard->GetAllEntries().GetIterator(); it.IsValid(); ++it)
@@ -254,46 +260,80 @@ void plNetworkedBlackboardComponent::NetworkSerialize(plNetworkMessage& msg)
       if (!ShouldReplicateEntry(it.Value()))
         continue;
 
-      if (bFullSnapshot)
-      {
-        entriesToSend.PushBack(it.Key());
-        continue;
-      }
-
       plUInt32 uiCached = 0;
-      if (!m_LastEntryChangeCounters.TryGetValue(it.Key(), uiCached) || uiCached != it.Value().m_uiChangeCounter)
+      if (bFullSnapshot || !m_LastEntryChangeCounters.TryGetValue(it.Key(), uiCached) || uiCached != it.Value().m_uiChangeCounter)
         entriesToSend.PushBack(it.Key());
+    }
+
+    for (auto it = m_LastEntryChangeCounters.GetIterator(); it.IsValid() && !bFullSnapshot; ++it)
+    {
+      if (!m_pBoard->GetAllEntries().Contains(it.Key()))
+        removed.PushBack(it.Key());
     }
   }
 
-  const plUInt16 uiCount = static_cast<plUInt16>(plMath::Min<plUInt32>(entriesToSend.GetCount(), 0xFFFF));
-  msg.WriteUInt16(uiCount);
+  // The count is written last: an entry whose value cannot be serialized is left out.
+  const plUInt32 uiCountPosition = msg.m_uiPosition;
+  msg.WriteUInt16(0);
 
-  for (plUInt32 i = 0; i < uiCount; ++i)
+  plUInt16 uiWritten = 0;
+  for (const plHashedString& sName : entriesToSend)
   {
-    const plHashedString& sName = entriesToSend[i];
     const plBlackboard::Entry* pEntry = m_pBoard->GetEntry(sName);
-    if (pEntry == nullptr)
+    if (pEntry == nullptr || uiWritten == 0xFFFF)
       continue;
 
+    const plUInt32 uiEntryStart = msg.m_uiPosition;
     msg.WriteString(sName.GetView());
-
-    const plUInt16 uiFlags = static_cast<plUInt16>(pEntry->m_Flags.GetValue());
-    msg.WriteUInt16(uiFlags);
-
+    msg.WriteUInt16(static_cast<plUInt16>(pEntry->m_Flags.GetValue()));
     if (!TryWriteVariantBlob(msg, pEntry->m_Value))
     {
-      static bool s_bLoggedVariantFailure = false;
-      if (!s_bLoggedVariantFailure)
-      {
-        s_bLoggedVariantFailure = true;
-        plLog::Warning("PL Net: NetworkedBlackboard failed to serialize variant for entry '{}'.", sName.GetData());
-      }
+      plLog::Warning("PL Net: NetworkedBlackboard on '{}' cannot send the value of entry '{}'.", GetOwner()->GetName(), sName.GetData());
+      msg.m_uiPosition = uiEntryStart;
+      msg.m_uiLength = uiEntryStart;
+      continue;
     }
+
+    ++uiWritten;
   }
 
+  const plUInt32 uiEnd = msg.m_uiPosition;
+  msg.m_uiPosition = uiCountPosition;
+  msg.WriteUInt16(uiWritten);
+  msg.m_uiPosition = uiEnd;
+  msg.m_uiLength = uiEnd;
+
+  msg.WriteUInt16(static_cast<plUInt16>(plMath::Min<plUInt32>(removed.GetCount(), 0xFFFF)));
+  for (plUInt32 i = 0; i < removed.GetCount() && i < 0xFFFF; ++i)
+    msg.WriteString(removed[i].GetView());
+}
+
+void plNetworkedBlackboardComponent::NetworkSerialize(plNetworkMessage& msg)
+{
+  if (!m_pBoard)
+    ResolveBlackboard();
+
+  WriteEntries(msg, m_bForceFullSnapshot);
+
+  // What was just written is the baseline of the next delta, for every recipient: deltas go to everyone at once.
   m_bForceFullSnapshot = false;
   RefreshChangeCacheFromBoard();
+}
+
+void plNetworkedBlackboardComponent::NetworkSerializeForClient(plNetworkMessage& msg, plUInt32 uiRecipientClientID, bool bInitialSync)
+{
+  if (!bInitialSync)
+  {
+    NetworkSerialize(msg);
+    return;
+  }
+
+  // A joining client gets everything; the delta the others are owed is left for them.
+  PL_IGNORE_UNUSED(uiRecipientClientID);
+  if (!m_pBoard)
+    ResolveBlackboard();
+
+  WriteEntries(msg, true);
 }
 
 void plNetworkedBlackboardComponent::NetworkDeserialize(plNetworkMessage& msg)
@@ -312,8 +352,7 @@ void plNetworkedBlackboardComponent::NetworkDeserialize(plNetworkMessage& msg)
   if (!m_pBoard)
     return;
 
-  PL_IGNORE_UNUSED(bFullSnapshot);
-
+  plHashSet<plHashedString> received;
   for (plUInt16 i = 0; i < uiCount; ++i)
   {
     const plString sName = msg.ReadString();
@@ -325,6 +364,7 @@ void plNetworkedBlackboardComponent::NetworkDeserialize(plNetworkMessage& msg)
 
     plHashedString sHashedName;
     sHashedName.Assign(sName.GetData());
+    received.Insert(sHashedName);
 
     m_pBoard->SetEntryValue(sHashedName, value);
 
@@ -332,6 +372,32 @@ void plNetworkedBlackboardComponent::NetworkDeserialize(plNetworkMessage& msg)
     {
       m_pBoard->SetEntryFlags(sHashedName, plBlackboardEntryFlags::Enum(uiFlags));
     }
+  }
+
+  const plUInt16 uiRemovedCount = msg.ReadUInt16();
+  for (plUInt16 i = 0; i < uiRemovedCount && !msg.HasReadError(); ++i)
+  {
+    plHashedString sName;
+    sName.Assign(msg.ReadString());
+    if (!msg.HasReadError())
+      m_pBoard->RemoveEntry(sName);
+  }
+
+  if (msg.HasReadError())
+    return;
+
+  // A full snapshot is the whole replicated board: what it does not list is gone.
+  if (bFullSnapshot)
+  {
+    plHybridArray<plHashedString, 16> stale;
+    for (auto it = m_pBoard->GetAllEntries().GetIterator(); it.IsValid(); ++it)
+    {
+      if (ShouldReplicateEntry(it.Value()) && !received.Contains(it.Key()))
+        stale.PushBack(it.Key());
+    }
+
+    for (const plHashedString& sName : stale)
+      m_pBoard->RemoveEntry(sName);
   }
 
   RefreshChangeCacheFromBoard();
