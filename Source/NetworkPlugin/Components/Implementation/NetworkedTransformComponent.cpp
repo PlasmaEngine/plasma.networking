@@ -154,7 +154,7 @@ void plNetworkedTransformComponent::UpdateAsAuthority()
   CaptureTransformState();
 
   // Throttle network sends to configured rate
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   double fSendInterval = (m_fSendRate > 0.0f) ? (1000.0 / m_fSendRate) : 50.0;
   if ((now - m_LastSendTime).GetMilliseconds() < fSendInterval)
     return;
@@ -176,7 +176,7 @@ void plNetworkedTransformComponent::UpdateAsRemote()
   // snapshot timestamps (which are also wall-clock based via GetSyncedTime/plTime::Now).
   // Using game clock (GetWorld()->GetClock().GetTimeDiff()) can drift due to
   // fixed timestep, time scaling, or pausing.
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   float frameDt = 0.0f;
   if (m_LastWallClockUpdateTime.GetSeconds() > 0.0)
   {
@@ -323,7 +323,7 @@ void plNetworkedTransformComponent::HandleTransformStateMessage(plNetworkMessage
     t.m_qRotation = qRot;
     t.m_vScale.Set(1.0f);
 
-    m_Interpolator.AddSnapshot(t, vVel, serverSendTime, plTime::Now(), ++m_uiSnapshotSequence);
+    m_Interpolator.AddSnapshot(t, vVel, serverSendTime, plNetworkClock::Now(), ++m_uiSnapshotSequence);
   }
 
   // Host: relay client-uploaded state to other clients (exclude owner; they already have it).

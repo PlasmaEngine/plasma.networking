@@ -7,6 +7,22 @@
 class plNetworkWorldModule;
 class plNetworkMessage;
 
+/// @brief The local clock every networking time stamp is taken from: plTime::Now() plus a process-wide offset.
+///
+/// The offset is zero unless a test sets it, to run a session as if the machine had been up for days. Keep durations
+/// and time stamps as plTime; a float holds an absolute time to only 15.6 ms after 1.5 days of uptime.
+class PL_NETWORKPLUGIN_DLL plNetworkClock
+{
+public:
+  static plTime Now() { return plTime::Now() + s_Offset; }
+
+  static void SetOffset(plTime offset) { s_Offset = offset; }
+  static plTime GetOffset() { return s_Offset; }
+
+private:
+  static plTime s_Offset;
+};
+
 /// @brief Manages synchronized network time between server and clients.
 /// 
 /// The server is the authoritative time source. Clients periodically sync
@@ -107,6 +123,8 @@ public:
   bool HasPassed(plTime networkTimestamp) const;
 
 private:
+  friend class plNetworkTestAccess;
+
   void SendSyncRequest();
   void CalculateOffset(plTime t0ClientSend, plTime t1ServerReceive, plTime t2ServerSend, plTime t3ClientReceive);
 

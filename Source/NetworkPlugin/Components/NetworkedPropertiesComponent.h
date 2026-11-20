@@ -75,6 +75,8 @@ protected:
   void Update() override;
 
 private:
+  friend class plNetworkTestAccess;
+
   struct ResolvedEntry
   {
     enum class Kind : plUInt8

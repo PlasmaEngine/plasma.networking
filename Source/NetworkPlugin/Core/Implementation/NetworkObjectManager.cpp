@@ -152,7 +152,7 @@ plUInt32 plNetworkObjectManager::SpawnNetworkObject(
   info.m_uiOwnerClientID = uiOwnerClientID;
   info.m_Authority = authority;
   info.m_sPrefabGuid = sPrefabGuid;
-  info.m_SpawnTime = plTime::Now();
+  info.m_SpawnTime = plNetworkClock::Now();
 
   // Store in tracking tables
   m_NetworkObjects[networkID] = info;
@@ -589,7 +589,7 @@ void plNetworkObjectManager::HandleSpawnMessage(plNetworkMessage& msg)
   info.m_uiOwnerClientID = ownerClientID;
   info.m_Authority = authority;
   info.m_sPrefabGuid = prefabGuid;
-  info.m_SpawnTime = plTime::Now();
+  info.m_SpawnTime = plNetworkClock::Now();
 
   m_NetworkObjects[networkID] = info;
   m_ObjectToNetworkID[pObject->GetHandle()] = networkID;

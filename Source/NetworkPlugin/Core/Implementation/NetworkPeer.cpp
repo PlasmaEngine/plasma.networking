@@ -13,6 +13,7 @@
 #include <NetworkPlugin/Core/Driver/enet/DriverEnet.h>
 #endif
 #include <NetworkPlugin/Core/Driver/platform/DriverPlatform.h>
+#include <NetworkPlugin/Core/Driver/simulated/DriverSimulated.h>
 
 plDynamicArray<plNetworkPeer*> plNetworkPeer::s_Peers;
 
@@ -46,8 +47,8 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
   if (config.m_uiMessageSize == 0 || config.m_uiMessagePoolSize == 0 || config.m_uiConnectionLimit == 0)
     return PL_FAILURE;
 
-  m_pDriver = CreateDriver(m_Config.m_DriverType);
-  if (!m_pDriver)
+  plNetworkDriverInterface* pTransport = CreateDriver(m_Config.m_DriverType);
+  if (!pTransport)
   {
     return PL_FAILURE;
   }
@@ -60,32 +61,43 @@ plResult plNetworkPeer::Initialize(const plNetworkConfig& config)
     m_MessagePool.PushBack(messageId);
   }
 
-  if(m_pDriver->Initalize(this, m_Config).Failed())
+  if (pTransport->Initalize(this, m_Config).Failed())
   {
     // The Platform driver needs a backend with a transport; without one the peer runs on ENet instead. A transport that
     // another peer in this process holds is not missing, so that peer fails instead of opening an ENet socket.
-    if (m_Config.m_DriverType == plDriverTypeEnum::Platform && static_cast<plDriverPlatform*>(m_pDriver)->IsTransportInUse())
+    const bool bTransportInUse = m_Config.m_DriverType == plDriverTypeEnum::Platform && static_cast<plDriverPlatform*>(pTransport)->IsTransportInUse();
+    if (bTransportInUse)
     {
       plLog::Error("PL Net: Failed to initialize network driver: the platform transport belongs to another peer");
-      Shutdown();
-      return PL_FAILURE;
     }
-
-    if (m_Config.m_DriverType == plDriverTypeEnum::Platform)
+    else if (m_Config.m_DriverType == plDriverTypeEnum::Platform)
     {
       plLog::Warning("PL Net: Platform transport unavailable, falling back to the ENet driver");
-      PL_DEFAULT_DELETE(m_pDriver);
+      pTransport->Shutdown();
+      PL_DEFAULT_DELETE(pTransport);
       m_Config.m_DriverType = plDriverTypeEnum::ENet;
-      m_pDriver = CreateDriver(m_Config.m_DriverType);
+      pTransport = CreateDriver(m_Config.m_DriverType);
     }
 
-    if (!m_pDriver || m_pDriver->Initalize(this, m_Config).Failed())
+    if (bTransportInUse || !pTransport || pTransport->Initalize(this, m_Config).Failed())
     {
-      plLog::Error("PL Net: Failed to initialize network driver");
-      Shutdown();
+      if (!bTransportInUse)
+        plLog::Error("PL Net: Failed to initialize network driver");
+
+      if (pTransport)
+      {
+        pTransport->Shutdown();
+        PL_DEFAULT_DELETE(pTransport);
+      }
+      DestroyMessageBuffers();
+      m_MessagePool.Clear();
       return PL_FAILURE;
     }
   }
+
+  // Every transport runs through the simulating driver, which passes messages straight on while no conditions are set.
+  m_pDriver = PL_DEFAULT_NEW(plDriverSimulated, pTransport);
+  m_pDriver->Initalize(this, m_Config).IgnoreResult();
 
   plStringBuilder sTmp;
   plLog::Info("PL Net: Network Peer Initialized using driver: {}", m_pDriver->GetDriverName().GetData(sTmp));
@@ -162,7 +174,7 @@ void plNetworkPeer::SendMessages(const plNetworkMessage& message)
   plBufferMessage buffer;
   buffer.m_bIsClient = true;
   buffer.m_message = message;
-  buffer.m_QueueTime = plTime::Now();
+  buffer.m_QueueTime = plNetworkClock::Now();
 
   m_OutgoingBuffer.PushBack(buffer);
 }
@@ -183,7 +195,7 @@ void plNetworkPeer::SendMessages(const plNetworkMessage& message, plNetworkConne
   plBufferMessage buffer;
   buffer.m_Targets.PushBack(target);
   buffer.m_message = message;
-  buffer.m_QueueTime = plTime::Now();
+  buffer.m_QueueTime = plNetworkClock::Now();
 
   m_OutgoingBuffer.PushBack(buffer);
 }
@@ -204,9 +216,19 @@ void plNetworkPeer::SendMessages(const plNetworkMessage& message, plDynamicArray
   plBufferMessage buffer;
   buffer.m_Targets = target;
   buffer.m_message = message;
-  buffer.m_QueueTime = plTime::Now();
+  buffer.m_QueueTime = plNetworkClock::Now();
 
   m_OutgoingBuffer.PushBack(buffer);
+}
+
+plNetworkDriverInterface* plNetworkPeer::GetTransportDriver() const
+{
+  return m_pDriver ? static_cast<plDriverSimulated*>(m_pDriver)->GetTransport() : nullptr;
+}
+
+plNetworkSimulator* plNetworkPeer::GetSimulator() const
+{
+  return m_pDriver ? &static_cast<plDriverSimulated*>(m_pDriver)->GetSimulator() : nullptr;
 }
 
 plNetworkPeer* plNetworkPeer::CreatePeer(const plNetworkConfig& config)

@@ -213,6 +213,9 @@ public:
   /// @brief Stop with a specific disconnect reason
   void Stop(plNetworkDisconnectReason::Enum reason = plNetworkDisconnectReason::ClientQuit);
 
+  /// @brief Why the last session of this module ended.
+  PL_NODISCARD plNetworkDisconnectReason::Enum GetLastDisconnectReason() const { return m_LastDisconnectReason; }
+
   /// @brief Kick a client with a reason
   void KickClient(plUInt32 uiClientID, plNetworkDisconnectReason::Enum reason = plNetworkDisconnectReason::Kicked);
 
@@ -289,6 +292,7 @@ private:
   bool m_bStopping = false;
   bool m_bStopRequested = false;
   plNetworkDisconnectReason::Enum m_DeferredStopReason = plNetworkDisconnectReason::ClientQuit;
+  plNetworkDisconnectReason::Enum m_LastDisconnectReason = plNetworkDisconnectReason::Unknown;
   plEnum<plNetworkRoleEnum> m_Role = plNetworkRoleEnum::Undefined;
   plEnum<plNetworkConnectionState> m_Status = plNetworkConnectionState::Disconnected;
   plUInt32 m_uiServerClientID = 0;

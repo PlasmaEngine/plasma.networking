@@ -365,6 +365,7 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
 
   PL_PROFILE_SCOPE("Network Stop");
   plLog::Dev("Stopping Network (reason: {})", static_cast<plUInt8>(reason));
+  m_LastDisconnectReason = reason;
 
   // Broadcast disconnect reason to all connected clients
   if (m_pPeer && m_Role == plNetworkRoleEnum::Host)
@@ -420,7 +421,7 @@ void plNetworkWorldModule::Stop(plNetworkDisconnectReason::Enum reason)
 
   m_Status = plNetworkConnectionState::Disconnected;
   m_Role = plNetworkRoleEnum::Undefined;
-  m_LastUpdate = plTime::Now();
+  m_LastUpdate = plNetworkClock::Now();
   BroadcastNetworkStateChange();
 }
 
@@ -527,7 +528,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
     }
   });
   float dt = GetWorld()->GetClock().GetTimeDiff().AsFloatInSeconds();
-  plTime timeNow = plTime::Now();
+  plTime timeNow = plNetworkClock::Now();
   float minDelta = m_fNetworkTickRate > 0 ? 1.0f / m_fNetworkTickRate : 0.0f;
 
   // Always update bandwidth manager for debug visualization (even when not connected)
@@ -627,7 +628,7 @@ void plNetworkWorldModule::OnUpdate(const UpdateContext& ctxt)
           pClient->m_uiClientID = m_uiNextClientID++;
           pClient->m_Connection = event.m_Sender;
           pClient->UpdateActivity(); // Initialize activity timestamp
-          pClient->m_AdmissionStartTime = plTime::Now();
+          pClient->m_AdmissionStartTime = plNetworkClock::Now();
           pClient->m_ConnectionState = plNetworkConnectionState::Connecting;
           m_pClients.PushBack(pClient);
         }
@@ -1440,7 +1441,7 @@ void plNetworkWorldModule::CheckClientTimeouts()
     float secondsSinceActivity = pClient->GetSecondsSinceLastActivity();
     const bool bAdmitted = pClient->m_ConnectionState == plNetworkConnectionState::Connected;
     const bool bExpiredAdmission = !bAdmitted &&
-      (plTime::Now() - pClient->m_AdmissionStartTime).GetSeconds() > plMath::Max(m_Config.m_fHandshakeTimeoutSeconds, 0.1f);
+      (plNetworkClock::Now() - pClient->m_AdmissionStartTime).GetSeconds() > plMath::Max(m_Config.m_fHandshakeTimeoutSeconds, 0.1f);
     if (pClient->m_ConnectionState == plNetworkConnectionState::Disconnecting ||
         pClient->m_ConnectionState == plNetworkConnectionState::Disconnected || bExpiredAdmission ||
         (bAdmitted && m_fClientTimeoutSeconds > 0.0f && secondsSinceActivity > m_fClientTimeoutSeconds))
@@ -1735,7 +1736,7 @@ bool plNetworkWorldModule::CheckRateLimit(plNetworkClient* pClient)
     return true; // No rate limiting
 
   // Reset counter each second
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   if ((now - pClient->m_LastRateLimitReset).GetSeconds() >= 1.0)
   {
     pClient->m_fMessagesPerSecond = 0.0f;
@@ -1784,7 +1785,7 @@ void plNetworkWorldModule::RecordProtocolViolation(plNetworkClient* pClient, con
   }
 
   ++pClient->m_uiProtocolViolations;
-  const plTime now = plTime::Now();
+  const plTime now = plNetworkClock::Now();
   if ((now - pClient->m_LastProtocolViolationLog).GetSeconds() >= 1.0)
   {
     plLog::Warning("PL Net: Protocol violation from client {} ({}/{}): {}",
@@ -1821,7 +1822,7 @@ plNetworkClient* plNetworkWorldModule::FindClientBySessionToken(plUInt64 uiSessi
 
 void plNetworkWorldModule::CleanupExpiredReconnectSlots()
 {
-  plTime now = plTime::Now();
+  plTime now = plNetworkClock::Now();
   
   for (plUInt32 i = m_pClients.GetCount(); i > 0; --i)
   {

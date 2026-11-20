@@ -127,7 +127,7 @@ plNetworkComponentState& plNetworkBandwidthManager::GetOrCreateState(plUInt32 ui
   {
     plNetworkComponentState newState;
     newState.m_uiNetworkID = uiNetworkID;
-    newState.m_LastUpdateTime = plTime::Now();
+    newState.m_LastUpdateTime = plNetworkClock::Now();
     m_ComponentStates[uiNetworkID] = newState;
     pState = &m_ComponentStates[uiNetworkID];
   }
@@ -180,7 +180,7 @@ void plNetworkBandwidthManager::UpdateStoredState(
   state.m_vLastPosition = position;
   state.m_qLastRotation = rotation;
   state.m_vLastScale = scale;
-  state.m_LastUpdateTime = plTime::Now();
+  state.m_LastUpdateTime = plNetworkClock::Now();
 }
 
 void plNetworkBandwidthManager::GetTransformDelta(
@@ -204,7 +204,7 @@ void plNetworkBandwidthManager::StoreComponentState(plUInt32 uiNetworkID, plArra
   plNetworkComponentState& state = GetOrCreateState(uiNetworkID);
   state.m_LastStateBuffer.SetCount(stateData.GetCount());
   plMemoryUtils::Copy(state.m_LastStateBuffer.GetData(), stateData.GetPtr(), stateData.GetCount());
-  state.m_LastUpdateTime = plTime::Now();
+  state.m_LastUpdateTime = plNetworkClock::Now();
 }
 
 bool plNetworkBandwidthManager::HasStateChanged(plUInt32 uiNetworkID, plArrayPtr<const plUInt8> newStateData)
@@ -255,7 +255,7 @@ void plNetworkBandwidthManager::QueueUpdate(plNetworkComponent* pComponent, plUI
   plQueuedNetworkUpdate update;
   update.m_uiComponentNetID = pComponent->GetNetID();
   update.m_Priority = GetComponentPriority(pComponent->GetNetID());
-  update.m_QueueTime = plTime::Now();
+  update.m_QueueTime = plNetworkClock::Now();
   update.m_uiEstimatedSize = uiEstimatedSize;
 
   // Calculate relevancy (simplified - would need client position)
@@ -338,7 +338,7 @@ bool plNetworkBandwidthManager::ShouldSendUpdate(plUInt32 uiNetworkID)
 
   // Check minimum update interval based on priority
   float minInterval = GetMinUpdateInterval(pState->m_Priority);
-  float timeSinceLastSend = (plTime::Now() - pState->m_LastSendTime).AsFloatInSeconds();
+  float timeSinceLastSend = (plNetworkClock::Now() - pState->m_LastSendTime).AsFloatInSeconds();
 
   if (timeSinceLastSend < minInterval)
   {
@@ -358,7 +358,7 @@ bool plNetworkBandwidthManager::ShouldSendUpdate(plUInt32 uiNetworkID)
 void plNetworkBandwidthManager::MarkUpdateSent(plUInt32 uiNetworkID)
 {
   plNetworkComponentState& state = GetOrCreateState(uiNetworkID);
-  state.m_LastSendTime = plTime::Now();
+  state.m_LastSendTime = plNetworkClock::Now();
 }
 
 float plNetworkBandwidthManager::GetMinUpdateInterval(plNetworkPriority::Enum priority) const

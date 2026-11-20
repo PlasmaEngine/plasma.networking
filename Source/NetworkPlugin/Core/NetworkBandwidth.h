@@ -8,6 +8,7 @@
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Containers/StaticArray.h>
 #include <Foundation/Time/Time.h>
+#include <NetworkPlugin/Core/NetworkTime.h>
 
 class plNetworkWorldModule;
 class plNetworkComponent;
@@ -83,7 +84,7 @@ struct PL_NETWORKPLUGIN_DLL plQueuedNetworkUpdate
   /// @brief Calculate effective priority (lower = more important)
   float GetEffectivePriority() const
   {
-    float timeFactor = (plTime::Now() - m_QueueTime).AsFloatInSeconds();
+    float timeFactor = (plNetworkClock::Now() - m_QueueTime).AsFloatInSeconds();
     return static_cast<float>(m_Priority) - timeFactor * 0.1f - m_fRelevancy;
   }
 
@@ -201,6 +202,8 @@ public:
   void DrawDebugStats(plWorld* pWorld);
 
 private:
+  friend class plNetworkTestAccess;
+
   /// @brief Draw the bandwidth history graph
   void DrawBandwidthGraph(plWorld* pWorld);
 

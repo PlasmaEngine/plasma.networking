@@ -311,7 +311,7 @@ void plNetworkedPropertiesComponent::Update()
     return;
   }
 
-  const plTime now = plTime::Now();
+  const plTime now = plNetworkClock::Now();
   const plTime interval = plTime::MakeFromSeconds(m_fSendRate > 0.0f ? 1.0 / m_fSendRate : 0.05);
   if (now - m_LastPollTime < interval)
     return;
@@ -407,7 +407,7 @@ void plNetworkedPropertiesComponent::NetworkSerializeForClient(plNetworkMessage&
   lastSent.SetCount(m_ResolvedEntries.GetCount());
   lastSentTimes.SetCount(m_ResolvedEntries.GetCount());
   const plUInt32 uiOwnerClientID = GetOwnerClientID();
-  const plTime now = plTime::Now();
+  const plTime now = plNetworkClock::Now();
   plUInt32 uiBitmask = 0;
 
   for (plUInt32 i = 0; i < m_ResolvedEntries.GetCount(); ++i)
@@ -490,7 +490,7 @@ void plNetworkedPropertiesComponent::NetworkDeserialize(plNetworkMessage& msg)
       {
         resolved.m_InterpStart = current;
         resolved.m_InterpTarget = value;
-        resolved.m_InterpStartTime = plTime::Now();
+        resolved.m_InterpStartTime = plNetworkClock::Now();
         resolved.m_bInterpolating = true;
         resolved.m_LastObserved = value;
         continue;
@@ -542,7 +542,7 @@ plVariant plNetworkedPropertiesComponent::LerpVariant(const plVariant& a, const 
 
 void plNetworkedPropertiesComponent::TickInterpolation()
 {
-  const plTime now = plTime::Now();
+  const plTime now = plNetworkClock::Now();
   const double fDuration = plMath::Max(0.001, static_cast<double>(m_fInterpolationTime));
 
   for (ResolvedEntry& resolved : m_ResolvedEntries)

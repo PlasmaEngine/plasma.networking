@@ -1,296 +1,258 @@
-#include "NetworkPlugin/Core/NetworkSimulation.h"
-#include <Foundation/Logging/Log.h>
+#include <NetworkPlugin/NetworkPluginPCH.h>
+
 #include <Foundation/Configuration/CVar.h>
+#include <NetworkPlugin/Core/NetworkSimulation.h>
 
-//////////////////////////////////////////////////////////////////////////
-// Console Variables
-//////////////////////////////////////////////////////////////////////////
-
+// Process-wide on purpose: every peer that is not given explicit settings follows these.
 plCVarBool cvar_NetSimEnabled("net_sim_enabled", false, plCVarFlags::Default, "Enable network condition simulation");
-plCVarFloat cvar_NetSimLatency("net_sim_latency", 0.0f, plCVarFlags::Default, "Additional latency in milliseconds");
+plCVarFloat cvar_NetSimLatency("net_sim_latency", 0.0f, plCVarFlags::Default, "One-way latency in milliseconds, applied on send and on receive");
 plCVarFloat cvar_NetSimJitter("net_sim_jitter", 0.0f, plCVarFlags::Default, "Latency jitter in milliseconds");
-plCVarFloat cvar_NetSimPacketLoss("net_sim_packetloss", 0.0f, plCVarFlags::Default, "Packet loss percentage (0-100)");
+plCVarFloat cvar_NetSimMinLatency("net_sim_min_latency", 0.0f, plCVarFlags::Default, "Lowest latency jitter can reach, in milliseconds");
+plCVarFloat cvar_NetSimPacketLoss("net_sim_packetloss", 0.0f, plCVarFlags::Default, "Packet loss percentage (0-100); reliable messages are resent");
 plCVarFloat cvar_NetSimDuplicate("net_sim_duplicate", 0.0f, plCVarFlags::Default, "Packet duplication percentage (0-100)");
 plCVarFloat cvar_NetSimReorder("net_sim_reorder", 0.0f, plCVarFlags::Default, "Packet reorder percentage (0-100)");
-plCVarInt cvar_NetSimBandwidth("net_sim_bandwidth", 0, plCVarFlags::Default, "Bandwidth limit in bytes/sec (0 = unlimited)");
-plCVarString cvar_NetSimPreset("net_sim_preset", "", plCVarFlags::Default, "Apply preset: lan, broadband, mobile3g, mobile4g, satellite, bad, none");
+plCVarInt cvar_NetSimBandwidth("net_sim_bandwidth", 0, plCVarFlags::Default, "Bandwidth limit in bytes/sec per connection (0 = unlimited)");
+plCVarString cvar_NetSimPreset("net_sim_preset", "", plCVarFlags::Default, "Apply preset: lan, broadband, mobile4g, mobile3g, satellite, bad, none");
 
-// One simulator for the whole process. No driver sends through it yet; whoever wires it in must give each
-// plNetworkPeer its own instance, since its packet queues hold per-connection state.
-static plNetworkSimulator s_NetworkSimulator;
+plNetworkSimulationSettings plNetworkSimulationSettings::MakePreset(plNetworkSimulationPreset::Enum preset)
+{
+  plNetworkSimulationSettings s;
+  s.m_bEnabled = preset != plNetworkSimulationPreset::None;
 
-//////////////////////////////////////////////////////////////////////////
-// plNetworkSimulator Implementation
-//////////////////////////////////////////////////////////////////////////
+  switch (preset)
+  {
+    case plNetworkSimulationPreset::LAN:
+      s.m_fLatencyMs = 2.0f;
+      s.m_fJitterMs = 1.0f;
+      s.m_fMinLatencyMs = 0.5f;
+      break;
+    case plNetworkSimulationPreset::Broadband:
+      s.m_fLatencyMs = 30.0f;
+      s.m_fJitterMs = 10.0f;
+      s.m_fMinLatencyMs = 15.0f;
+      s.m_fPacketLossPercent = 0.5f;
+      s.m_fDuplicatePercent = 0.1f;
+      s.m_fReorderPercent = 0.5f;
+      break;
+    case plNetworkSimulationPreset::Mobile4G:
+      s.m_fLatencyMs = 60.0f;
+      s.m_fJitterMs = 30.0f;
+      s.m_fMinLatencyMs = 30.0f;
+      s.m_fPacketLossPercent = 1.0f;
+      s.m_fDuplicatePercent = 0.2f;
+      s.m_fReorderPercent = 1.0f;
+      break;
+    case plNetworkSimulationPreset::Mobile3G:
+      s.m_fLatencyMs = 200.0f;
+      s.m_fJitterMs = 100.0f;
+      s.m_fMinLatencyMs = 100.0f;
+      s.m_fPacketLossPercent = 5.0f;
+      s.m_fDuplicatePercent = 1.0f;
+      s.m_fReorderPercent = 5.0f;
+      s.m_uiBandwidthLimitBps = 50000;
+      break;
+    case plNetworkSimulationPreset::Satellite:
+      s.m_fLatencyMs = 600.0f;
+      s.m_fJitterMs = 50.0f;
+      s.m_fMinLatencyMs = 500.0f;
+      s.m_fPacketLossPercent = 2.0f;
+      break;
+    case plNetworkSimulationPreset::Bad:
+      s.m_fLatencyMs = 300.0f;
+      s.m_fJitterMs = 150.0f;
+      s.m_fMinLatencyMs = 100.0f;
+      s.m_fPacketLossPercent = 15.0f;
+      s.m_fDuplicatePercent = 5.0f;
+      s.m_fReorderPercent = 10.0f;
+      s.m_uiBandwidthLimitBps = 20000;
+      break;
+    case plNetworkSimulationPreset::None:
+    default:
+      break;
+  }
+
+  return s;
+}
 
 plNetworkSimulator::plNetworkSimulator()
 {
-  m_Random.Initialize(static_cast<plUInt64>(plTime::Now().GetNanoseconds()));
+  Reseed();
 }
 
-void plNetworkSimulator::Initialize()
+void plNetworkSimulator::SetSettings(const plNetworkSimulationSettings& settings)
 {
-  m_DelayedPackets.Clear();
-  ResetStatistics();
-  m_LastBandwidthReset = plTime::Now();
-  plLog::Dev("PL Net: Network simulator initialized");
+  m_bFollowCVars = false;
+  const bool bReseed = settings.m_uiSeed != m_Settings.m_uiSeed;
+  m_Settings = settings;
+  if (bReseed)
+    Reseed();
 }
 
-void plNetworkSimulator::ApplyPresetLAN()
+void plNetworkSimulator::Reseed()
 {
-  m_Settings.m_bEnabled = true;
-  m_Settings.m_fLatencyMs = 2.0f;
-  m_Settings.m_fJitterMs = 1.0f;
-  m_Settings.m_fMinLatencyMs = 0.5f;
-  m_Settings.m_fPacketLossPercent = 0.0f;
-  m_Settings.m_fDuplicatePercent = 0.0f;
-  m_Settings.m_fReorderPercent = 0.0f;
-  m_Settings.m_uiBandwidthLimitBps = 0;
-  plLog::Info("PL Net: Applied LAN preset ({}ms latency)", m_Settings.m_fLatencyMs);
+  if (m_Settings.m_uiSeed != 0)
+    m_Random.Initialize(m_Settings.m_uiSeed);
+  else
+    m_Random.InitializeFromCurrentTime();
 }
 
-void plNetworkSimulator::ApplyPresetBroadband()
+void plNetworkSimulator::Update()
 {
-  m_Settings.m_bEnabled = true;
-  m_Settings.m_fLatencyMs = 30.0f;
-  m_Settings.m_fJitterMs = 10.0f;
-  m_Settings.m_fMinLatencyMs = 15.0f;
-  m_Settings.m_fPacketLossPercent = 0.5f;
-  m_Settings.m_fDuplicatePercent = 0.1f;
-  m_Settings.m_fReorderPercent = 0.5f;
-  m_Settings.m_uiBandwidthLimitBps = 0;
-  plLog::Info("PL Net: Applied Broadband preset ({}ms latency, {}% loss)", 
-    m_Settings.m_fLatencyMs, m_Settings.m_fPacketLossPercent);
-}
+  if (!m_bFollowCVars)
+    return;
 
-void plNetworkSimulator::ApplyPresetMobile3G()
-{
-  m_Settings.m_bEnabled = true;
-  m_Settings.m_fLatencyMs = 200.0f;
-  m_Settings.m_fJitterMs = 100.0f;
-  m_Settings.m_fMinLatencyMs = 100.0f;
-  m_Settings.m_fPacketLossPercent = 5.0f;
-  m_Settings.m_fDuplicatePercent = 1.0f;
-  m_Settings.m_fReorderPercent = 5.0f;
-  m_Settings.m_uiBandwidthLimitBps = 50000; // ~400 kbps
-  plLog::Info("PL Net: Applied Mobile 3G preset ({}ms latency, {}% loss)", 
-    m_Settings.m_fLatencyMs, m_Settings.m_fPacketLossPercent);
-}
-
-void plNetworkSimulator::ApplyPresetMobile4G()
-{
-  m_Settings.m_bEnabled = true;
-  m_Settings.m_fLatencyMs = 60.0f;
-  m_Settings.m_fJitterMs = 30.0f;
-  m_Settings.m_fMinLatencyMs = 30.0f;
-  m_Settings.m_fPacketLossPercent = 1.0f;
-  m_Settings.m_fDuplicatePercent = 0.2f;
-  m_Settings.m_fReorderPercent = 1.0f;
-  m_Settings.m_uiBandwidthLimitBps = 0;
-  plLog::Info("PL Net: Applied Mobile 4G preset ({}ms latency, {}% loss)", 
-    m_Settings.m_fLatencyMs, m_Settings.m_fPacketLossPercent);
-}
-
-void plNetworkSimulator::ApplyPresetSatellite()
-{
-  m_Settings.m_bEnabled = true;
-  m_Settings.m_fLatencyMs = 600.0f;
-  m_Settings.m_fJitterMs = 50.0f;
-  m_Settings.m_fMinLatencyMs = 500.0f;
-  m_Settings.m_fPacketLossPercent = 2.0f;
-  m_Settings.m_fDuplicatePercent = 0.0f;
-  m_Settings.m_fReorderPercent = 0.0f;
-  m_Settings.m_uiBandwidthLimitBps = 0;
-  plLog::Info("PL Net: Applied Satellite preset ({}ms latency, {}% loss)", 
-    m_Settings.m_fLatencyMs, m_Settings.m_fPacketLossPercent);
-}
-
-void plNetworkSimulator::ApplyPresetBadConnection()
-{
-  m_Settings.m_bEnabled = true;
-  m_Settings.m_fLatencyMs = 300.0f;
-  m_Settings.m_fJitterMs = 150.0f;
-  m_Settings.m_fMinLatencyMs = 100.0f;
-  m_Settings.m_fPacketLossPercent = 15.0f;
-  m_Settings.m_fDuplicatePercent = 5.0f;
-  m_Settings.m_fReorderPercent = 10.0f;
-  m_Settings.m_uiBandwidthLimitBps = 20000;
-  plLog::Info("PL Net: Applied Bad Connection preset ({}ms latency, {}% loss)", 
-    m_Settings.m_fLatencyMs, m_Settings.m_fPacketLossPercent);
-}
-
-void plNetworkSimulator::ApplyPresetNone()
-{
-  m_Settings.m_bEnabled = false;
-  m_Settings.m_fLatencyMs = 0.0f;
-  m_Settings.m_fJitterMs = 0.0f;
-  m_Settings.m_fMinLatencyMs = 0.0f;
-  m_Settings.m_fPacketLossPercent = 0.0f;
-  m_Settings.m_fDuplicatePercent = 0.0f;
-  m_Settings.m_fReorderPercent = 0.0f;
-  m_Settings.m_uiBandwidthLimitBps = 0;
-  Clear();
-  plLog::Info("PL Net: Network simulation disabled");
-}
-
-bool plNetworkSimulator::QueueOutgoingPacket(const plUInt8* data, plUInt32 size, plUInt32 connectionID)
-{
-  if (!m_Settings.m_bEnabled)
-    return true; // Pass through
-
-  m_uiTotalPackets++;
-
-  // Check bandwidth limit
-  if (m_Settings.m_uiBandwidthLimitBps > 0)
+  const plStringView sPreset = cvar_NetSimPreset.GetValue();
+  if (!sPreset.IsEmpty())
   {
-    plTime now = plTime::Now();
-    if ((now - m_LastBandwidthReset).GetSeconds() >= 1.0)
+    plNetworkSimulationPreset::Enum preset = plNetworkSimulationPreset::None;
+    bool bKnown = true;
+    if (sPreset.IsEqual_NoCase("lan"))
+      preset = plNetworkSimulationPreset::LAN;
+    else if (sPreset.IsEqual_NoCase("broadband"))
+      preset = plNetworkSimulationPreset::Broadband;
+    else if (sPreset.IsEqual_NoCase("mobile4g"))
+      preset = plNetworkSimulationPreset::Mobile4G;
+    else if (sPreset.IsEqual_NoCase("mobile3g"))
+      preset = plNetworkSimulationPreset::Mobile3G;
+    else if (sPreset.IsEqual_NoCase("satellite"))
+      preset = plNetworkSimulationPreset::Satellite;
+    else if (sPreset.IsEqual_NoCase("bad"))
+      preset = plNetworkSimulationPreset::Bad;
+    else if (!sPreset.IsEqual_NoCase("none"))
+      bKnown = false;
+
+    if (bKnown)
     {
-      m_uiBytesSentThisSecond = 0;
-      m_LastBandwidthReset = now;
-    }
-
-    if (m_uiBytesSentThisSecond + size > m_Settings.m_uiBandwidthLimitBps)
-    {
-      m_uiDroppedPackets++;
-      return false; // Drop due to bandwidth limit
-    }
-    m_uiBytesSentThisSecond += size;
-  }
-
-  // Check packet loss
-  if (m_Settings.ShouldDropPacket(m_Random))
-  {
-    m_uiDroppedPackets++;
-    return false;
-  }
-
-  // Calculate delivery time
-  float latencyMs = m_Settings.GetEffectiveLatency(m_Random);
-  plTime deliveryTime = plTime::Now() + plTime::MakeFromMilliseconds(latencyMs);
-
-  // Check for reordering - if so, add extra delay
-  if (m_Settings.ShouldReorderPacket(m_Random))
-  {
-    deliveryTime += plTime::MakeFromMilliseconds(m_Settings.m_fJitterMs * 2.0f);
-    m_uiReorderedPackets++;
-  }
-
-  // Queue the packet
-  plDelayedPacket packet;
-  packet.m_DeliveryTime = deliveryTime;
-  packet.m_Data.SetCountUninitialized(size);
-  plMemoryUtils::Copy(packet.m_Data.GetData(), data, size);
-  packet.m_uiConnectionID = connectionID;
-  packet.m_bIsDuplicate = false;
-  m_DelayedPackets.PushBack(packet);
-
-  // Check for duplication
-  if (m_Settings.ShouldDuplicatePacket(m_Random))
-  {
-    plDelayedPacket duplicate = packet;
-    duplicate.m_bIsDuplicate = true;
-    // Duplicate arrives slightly later
-    duplicate.m_DeliveryTime += plTime::MakeFromMilliseconds(m_Settings.m_fJitterMs);
-    m_DelayedPackets.PushBack(duplicate);
-    m_uiDuplicatedPackets++;
-  }
-
-  return true;
-}
-
-void plNetworkSimulator::GetReadyPackets(plTime currentTime, plDynamicArray<plDelayedPacket>& outPackets)
-{
-  outPackets.Clear();
-
-  // Find packets ready for delivery
-  for (plUInt32 i = 0; i < m_DelayedPackets.GetCount(); )
-  {
-    if (m_DelayedPackets[i].m_DeliveryTime <= currentTime)
-    {
-      outPackets.PushBack(m_DelayedPackets[i]);
-      m_DelayedPackets.RemoveAtAndCopy(i);
+      // The preset becomes the CVar values, so reading the CVars below keeps it instead of overwriting it.
+      const plNetworkSimulationSettings s = plNetworkSimulationSettings::MakePreset(preset);
+      cvar_NetSimEnabled = s.m_bEnabled;
+      cvar_NetSimLatency = s.m_fLatencyMs;
+      cvar_NetSimJitter = s.m_fJitterMs;
+      cvar_NetSimMinLatency = s.m_fMinLatencyMs;
+      cvar_NetSimPacketLoss = s.m_fPacketLossPercent;
+      cvar_NetSimDuplicate = s.m_fDuplicatePercent;
+      cvar_NetSimReorder = s.m_fReorderPercent;
+      cvar_NetSimBandwidth = static_cast<int>(s.m_uiBandwidthLimitBps);
+      plLog::Info("PL Net: Applied network simulation preset '{}'", sPreset);
     }
     else
     {
-      ++i;
+      plLog::Warning("PL Net: Unknown network simulation preset '{}'", sPreset);
     }
-  }
-}
 
-void plNetworkSimulator::Update(plTime currentTime)
-{
-  // Sync settings from CVars
+    cvar_NetSimPreset = "";
+  }
+
   m_Settings.m_bEnabled = cvar_NetSimEnabled;
   m_Settings.m_fLatencyMs = cvar_NetSimLatency;
   m_Settings.m_fJitterMs = cvar_NetSimJitter;
+  m_Settings.m_fMinLatencyMs = cvar_NetSimMinLatency;
   m_Settings.m_fPacketLossPercent = cvar_NetSimPacketLoss;
   m_Settings.m_fDuplicatePercent = cvar_NetSimDuplicate;
   m_Settings.m_fReorderPercent = cvar_NetSimReorder;
-  m_Settings.m_uiBandwidthLimitBps = static_cast<plUInt32>(cvar_NetSimBandwidth.GetValue());
-
-  // Check for preset changes
-  plStringView preset = cvar_NetSimPreset.GetValue();
-  if (!preset.IsEmpty())
-  {
-    if (preset.IsEqual_NoCase("lan"))
-      ApplyPresetLAN();
-    else if (preset.IsEqual_NoCase("broadband"))
-      ApplyPresetBroadband();
-    else if (preset.IsEqual_NoCase("mobile3g"))
-      ApplyPresetMobile3G();
-    else if (preset.IsEqual_NoCase("mobile4g"))
-      ApplyPresetMobile4G();
-    else if (preset.IsEqual_NoCase("satellite"))
-      ApplyPresetSatellite();
-    else if (preset.IsEqual_NoCase("bad"))
-      ApplyPresetBadConnection();
-    else if (preset.IsEqual_NoCase("none"))
-      ApplyPresetNone();
-
-    // Clear the preset CVar after applying
-    cvar_NetSimPreset = "";
-  }
+  m_Settings.m_uiBandwidthLimitBps = static_cast<plUInt32>(plMath::Max(cvar_NetSimBandwidth.GetValue(), 0));
 }
 
-void plNetworkSimulator::Clear()
+bool plNetworkSimulator::Roll(float fPercent)
 {
-  m_DelayedPackets.Clear();
+  if (fPercent <= 0.0f)
+    return false;
+  return m_Random.FloatMinMax(0.0f, 100.0f) < fPercent;
 }
 
-plUInt32 plNetworkSimulator::GetQueuedBytes() const
+plTime plNetworkSimulator::RollDelay()
 {
-  plUInt32 total = 0;
-  for (const auto& packet : m_DelayedPackets)
+  float fDelayMs = m_Settings.m_fLatencyMs;
+  if (m_Settings.m_fJitterMs > 0.0f)
+    fDelayMs += m_Random.FloatMinMax(-1.0f, 1.0f) * m_Settings.m_fJitterMs;
+
+  fDelayMs = plMath::Max(plMath::Max(fDelayMs, m_Settings.m_fMinLatencyMs), 0.0f);
+  return plTime::MakeFromMilliseconds(fDelayMs);
+}
+
+plNetworkSimulator::Decision plNetworkSimulator::Schedule(Link& ref_link, plNetworkChannelTypeEnum::Enum channel, plUInt32 uiSize, plTime now)
+{
+  Decision decision;
+  decision.m_DeliveryTime = now;
+
+  const bool bReliable = IsReliable(channel);
+
+  if (!m_Settings.m_bEnabled)
   {
-    total += packet.m_Data.GetCount();
+    // Nothing is delayed, but a message sent while earlier ones are still queued must not overtake them.
+    if (bReliable || IsSequenced(channel))
+      decision.m_DeliveryTime = plMath::Max(now, ref_link.m_LastReliableDelivery);
+    if (bReliable)
+      ref_link.m_LastReliableDelivery = decision.m_DeliveryTime;
+    return decision;
   }
-  return total;
+
+  plTime start = now;
+  if (m_Settings.m_uiBandwidthLimitBps > 0)
+  {
+    start = plMath::Max(now, ref_link.m_BandwidthFreeAt);
+    if (!bReliable && start - now > plTime::MakeFromMilliseconds(500))
+    {
+      // The link is saturated; a real router drops what does not fit in its queue.
+      ++m_uiDropped;
+      decision.m_bDeliver = false;
+      return decision;
+    }
+
+    ref_link.m_BandwidthFreeAt = start + plTime::MakeFromSeconds(static_cast<double>(uiSize) / m_Settings.m_uiBandwidthLimitBps);
+  }
+
+  plTime delivery = start + RollDelay();
+
+  if (bReliable)
+  {
+    // Each loss costs ENet a resend about one round trip later.
+    for (plUInt32 uiAttempt = 0; uiAttempt < 8 && Roll(m_Settings.m_fPacketLossPercent); ++uiAttempt)
+    {
+      delivery += plTime::MakeFromMilliseconds(plMath::Max(2.0f * m_Settings.m_fLatencyMs, 0.0f) + 30.0f);
+      ++m_uiResent;
+    }
+
+    delivery = plMath::Max(delivery, ref_link.m_LastReliableDelivery);
+    ref_link.m_LastReliableDelivery = delivery;
+    decision.m_DeliveryTime = delivery;
+    return decision;
+  }
+
+  if (Roll(m_Settings.m_fPacketLossPercent))
+  {
+    ++m_uiDropped;
+    decision.m_bDeliver = false;
+    return decision;
+  }
+
+  if (Roll(m_Settings.m_fReorderPercent))
+  {
+    // Held back long enough for the next messages to overtake it, also when there is no jitter.
+    delivery += plTime::MakeFromMilliseconds(plMath::Max(2.0f * m_Settings.m_fJitterMs, 20.0f));
+    ++m_uiReordered;
+  }
+
+  // ENet does not hand out an unreliable sequenced message before the reliable one sent ahead of it.
+  if (IsSequenced(channel))
+    delivery = plMath::Max(delivery, ref_link.m_LastReliableDelivery);
+
+  decision.m_DeliveryTime = delivery;
+
+  if (channel == plNetworkChannelTypeEnum::Unreliable && Roll(m_Settings.m_fDuplicatePercent))
+  {
+    decision.m_bDuplicate = true;
+    decision.m_DuplicateDeliveryTime = delivery + plTime::MakeFromMilliseconds(plMath::Max(m_Settings.m_fJitterMs, 1.0f));
+    ++m_uiDuplicated;
+  }
+
+  return decision;
 }
 
 void plNetworkSimulator::ResetStatistics()
 {
-  m_uiDroppedPackets = 0;
-  m_uiDuplicatedPackets = 0;
-  m_uiReorderedPackets = 0;
-  m_uiTotalPackets = 0;
-  m_uiBytesSentThisSecond = 0;
-}
-
-//////////////////////////////////////////////////////////////////////////
-// CVar Registration
-//////////////////////////////////////////////////////////////////////////
-
-namespace plNetworkSimCVars
-{
-  void RegisterCVars()
-  {
-    // CVars are auto-registered via static initialization
-    plLog::Dev("PL Net: Network simulation CVars registered");
-  }
-
-  plNetworkSimulator* GetSimulator()
-  {
-    return &s_NetworkSimulator;
-  }
+  m_uiDropped = 0;
+  m_uiDuplicated = 0;
+  m_uiReordered = 0;
+  m_uiResent = 0;
 }

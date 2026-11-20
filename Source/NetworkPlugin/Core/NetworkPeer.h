@@ -5,8 +5,10 @@
 #include <NetworkPlugin/Core/NetworkMessage.h>
 #include <NetworkPlugin/NetworkPluginDLL.h>
 #include <Foundation/Time/Time.h>
+#include <NetworkPlugin/Core/NetworkTime.h>
 
 class plNetworkDriverInterface;
+class plNetworkSimulator;
 
 struct PL_NETWORKPLUGIN_DLL plBufferMessage
 {
@@ -18,7 +20,7 @@ public:
 
   float GetEffectivePriority() const
   {
-    const float ageSeconds = (plTime::Now() - m_QueueTime).AsFloatInSeconds();
+    const float ageSeconds = (plNetworkClock::Now() - m_QueueTime).AsFloatInSeconds();
     return static_cast<float>(m_message.GetPriority()) - ageSeconds * 0.25f;
   }
 };
@@ -69,8 +71,14 @@ public:
 
   void Update(float dt);
 
-  /// @brief Get the network driver owned by this peer
+  /// @brief Get the network driver owned by this peer. It is the simulating driver that wraps the transport.
   plNetworkDriverInterface* GetDriver() const { return m_pDriver; }
+
+  /// @brief The ENet or platform driver below the simulating driver.
+  plNetworkDriverInterface* GetTransportDriver() const;
+
+  /// @brief The network conditions this peer simulates. Settings applied here replace the net_sim_* CVars for this peer.
+  plNetworkSimulator* GetSimulator() const;
 
 private:
   /// @brief Every live peer. Worlds can update on different threads, so it is only touched under s_PeersMutex.

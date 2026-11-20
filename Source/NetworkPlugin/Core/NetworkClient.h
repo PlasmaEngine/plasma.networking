@@ -3,6 +3,7 @@
 #include "NetworkTypes.h"
 #include <NetworkPlugin/NetworkPluginDLL.h>
 #include <Foundation/Time/Time.h>
+#include <NetworkPlugin/Core/NetworkTime.h>
 
 /// @brief Quality level for adaptive behavior based on connection quality
 struct plNetworkQualityLevel
@@ -133,12 +134,12 @@ public:
   plNetworkConnectionQuality m_ConnectionQuality;
 
   /// @brief Update the last activity timestamp to now
-  void UpdateActivity() { m_LastActivityTime = plTime::Now(); }
+  void UpdateActivity() { m_LastActivityTime = plNetworkClock::Now(); }
 
   /// @brief Get seconds since last activity
   float GetSecondsSinceLastActivity() const
   {
-    return static_cast<float>((plTime::Now() - m_LastActivityTime).GetSeconds());
+    return static_cast<float>((plNetworkClock::Now() - m_LastActivityTime).GetSeconds());
   }
 
   /// @brief Get the connection quality level
@@ -199,7 +200,7 @@ public:
   /// @brief Increment message counter for rate limiting
   void RecordMessageReceived()
   {
-    plTime now = plTime::Now();
+    plTime now = plNetworkClock::Now();
     if ((now - m_MessageCountStartTime).GetSeconds() >= 1.0)
     {
       m_fMessagesPerSecond = static_cast<float>(m_uiMessagesThisSecond);

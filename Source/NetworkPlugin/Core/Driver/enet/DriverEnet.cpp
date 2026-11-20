@@ -254,6 +254,12 @@ plResult plDriverEnet::PopEvent(plNetworkEvent& event)
         }
         event.m_Message.m_uiLength = static_cast<plUInt32>(enetEvent.packet->dataLength);
         plMemoryUtils::Copy(event.m_Message.m_pBuffer, enetEvent.packet->data, event.m_Message.m_uiLength);
+        if ((enetEvent.packet->flags & ENET_PACKET_FLAG_RELIABLE) != 0)
+          event.m_Message.SetChannelType(plNetworkChannelTypeEnum::ReliableOrdered);
+        else if ((enetEvent.packet->flags & ENET_PACKET_FLAG_UNSEQUENCED) != 0)
+          event.m_Message.SetChannelType(plNetworkChannelTypeEnum::Unreliable);
+        else
+          event.m_Message.SetChannelType(plNetworkChannelTypeEnum::UnreliableOrdered);
         enet_packet_destroy(enetEvent.packet);
         break;
       }
